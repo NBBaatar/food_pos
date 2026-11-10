@@ -25,6 +25,9 @@ coverage/
 playwright-report/
 test-results/
 
+# Локал Postgres кластер (dev)
+.pgdata/
+
 # Prisma local db
 apps/api/prisma/*.db
 apps/api/prisma/*.db-journal

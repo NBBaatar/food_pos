@@ -1,0 +1,23 @@
+{
+  "name": "food-pos",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n api,web -c magenta,cyan \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "npm run dev -w @foodpos/api",
+    "dev:web": "npm run dev -w @foodpos/web",
+    "build": "npm run build -w @foodpos/api && npm run build -w @foodpos/web",
+    "typecheck": "npm run typecheck -w @foodpos/api && npm run typecheck -w @foodpos/web",
+    "test": "npm run test -w @foodpos/api",
+    "db:setup": "npm run db:setup -w @foodpos/api",
+    "db:seed": "npm run db:seed -w @foodpos/api"
+  },
+  "devDependencies": {
+    "concurrently": "^10.0.7",
+    "typescript": "^7.0.2"
+  }
+}
