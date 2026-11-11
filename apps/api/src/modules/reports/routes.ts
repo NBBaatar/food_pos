@@ -5,6 +5,7 @@ import { PERMISSIONS } from '@shared/permissions';
 import { env } from '../../config/env';
 import { prisma } from '../../db/prisma';
 import { addDaysIso, businessDateFor } from '../../lib/time';
+import { AppError } from '../../lib/errors';
 import { parseQuery } from '../../lib/validate';
 import { authenticate } from '../../middleware/auth';
 import { requirePermission } from '../../middleware/rbac';
@@ -18,6 +19,9 @@ const businessToday = (): string => businessDateFor(new Date(), env.DAY_START_HO
 function toFilters(query: ReportQuery): ReportFilters {
   const to = query.to ?? businessToday();
   const from = query.from ?? addDaysIso(to, -29);
+  if (from > to) {
+    throw new AppError(400, 'Эхлэх огноо дуусах огнооноос хойш байж болохгүй', 'BAD_RANGE');
+  }
   return {
     from,
     to,

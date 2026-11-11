@@ -7,7 +7,7 @@ import { writeAudit } from '../../lib/audit';
 import { toAuthUser } from '../../lib/dto';
 import { AppError } from '../../lib/errors';
 import { verifyPassword } from '../../lib/password';
-import { createRefreshToken, hashToken, signAccessToken, verifyAccessToken } from '../../lib/tokens';
+import { createRefreshToken, hashToken, signAccessToken } from '../../lib/tokens';
 import { parseBody } from '../../lib/validate';
 import { authenticate } from '../../middleware/auth';
 
@@ -109,14 +109,6 @@ router.get('/me', authenticate, async (req, res) => {
   });
   if (!user) throw new AppError(401, 'Хэрэглэгч олдсонгүй', 'NO_USER');
   res.json({ user: toAuthUser(user) });
-});
-
-/** Токен хүчинтэй эсэхийг шалгах туслах (web boot дээр ашиглана) */
-router.get('/verify', async (req, res) => {
-  const header = req.headers.authorization;
-  const token = header?.startsWith('Bearer ') ? header.slice(7) : '';
-  const payload = token ? verifyAccessToken(token) : null;
-  res.json({ valid: Boolean(payload) });
 });
 
 export default router;

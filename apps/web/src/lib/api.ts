@@ -17,6 +17,9 @@ const BASE = (import.meta.env.VITE_API_BASE as string | undefined) ?? '/api/v1';
 
 let accessToken: string | null = null;
 let refreshing: Promise<AuthUser | null> | null = null;
+/** Boot-ийн давхар дуудлага (React StrictMode) refresh-ийг хоёр удаа эргүүлэхээс сэргийлнэ */
+let sessionCache: { user: AuthUser | null; at: number } | null = null;
+const SESSION_CACHE_MS = 5_000;
 
 export class ApiError extends Error {
   status: number;
@@ -96,11 +99,15 @@ export async function login(email: string, password: string): Promise<AuthUser> 
     body: JSON.stringify({ email, password }),
   });
   accessToken = data.accessToken;
+  sessionCache = { user: data.user, at: Date.now() };
   return data.user;
 }
 
 export async function restoreSession(): Promise<AuthUser | null> {
-  return refreshOnce();
+  if (sessionCache && Date.now() - sessionCache.at < SESSION_CACHE_MS) return sessionCache.user;
+  const user = await refreshOnce();
+  sessionCache = { user, at: Date.now() };
+  return user;
 }
 
 export async function logout(): Promise<void> {
@@ -108,6 +115,7 @@ export async function logout(): Promise<void> {
     await request('/auth/logout', { method: 'POST' });
   } finally {
     accessToken = null;
+    sessionCache = null;
   }
 }
 

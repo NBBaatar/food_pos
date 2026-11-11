@@ -1,15 +1,18 @@
+import { Suspense, lazy } from 'react';
 import { Navigate, Outlet, Route, Routes } from 'react-router-dom';
 import { Loader2 } from 'lucide-react';
 import { AppShell } from '@/components/layout/AppShell';
 import { useAuth } from '@/lib/auth';
-import { CardsPage } from '@/pages/CardsPage';
-import { DashboardPage } from '@/pages/DashboardPage';
-import { KioskPage } from '@/pages/KioskPage';
 import { LoginPage } from '@/pages/LoginPage';
-import { ReportsPage } from '@/pages/ReportsPage';
-import { ScansPage } from '@/pages/ScansPage';
-import { SettingsPage } from '@/pages/SettingsPage';
-import { UsersPage } from '@/pages/UsersPage';
+
+// Хүнд хуудсуудыг эрэлтээр ачаалж, эхний bundle-ыг жижиг байлгана
+const DashboardPage = lazy(() => import('@/pages/DashboardPage').then((m) => ({ default: m.DashboardPage })));
+const ReportsPage = lazy(() => import('@/pages/ReportsPage').then((m) => ({ default: m.ReportsPage })));
+const ScansPage = lazy(() => import('@/pages/ScansPage').then((m) => ({ default: m.ScansPage })));
+const UsersPage = lazy(() => import('@/pages/UsersPage').then((m) => ({ default: m.UsersPage })));
+const CardsPage = lazy(() => import('@/pages/CardsPage').then((m) => ({ default: m.CardsPage })));
+const SettingsPage = lazy(() => import('@/pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
+const KioskPage = lazy(() => import('@/pages/KioskPage').then((m) => ({ default: m.KioskPage })));
 
 function Splash(): JSX.Element {
   return (
@@ -31,22 +34,24 @@ export function App(): JSX.Element {
   const { booting, user } = useAuth();
 
   return (
-    <Routes>
-      <Route path="/login" element={booting ? <Splash /> : user ? <Navigate to="/" replace /> : <LoginPage />} />
+    <Suspense fallback={<Splash />}>
+      <Routes>
+        <Route path="/login" element={booting ? <Splash /> : user ? <Navigate to="/" replace /> : <LoginPage />} />
 
-      <Route element={<AppShell />}>
-        <Route path="/kiosk" element={<KioskPage />} />
-        <Route element={<RequireAuth />}>
-          <Route index element={<DashboardPage />} />
-          <Route path="/reports" element={<ReportsPage />} />
-          <Route path="/scans" element={<ScansPage />} />
-          <Route path="/users" element={<UsersPage />} />
-          <Route path="/cards" element={<CardsPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
+        <Route element={<AppShell />}>
+          <Route path="/kiosk" element={<KioskPage />} />
+          <Route element={<RequireAuth />}>
+            <Route index element={<DashboardPage />} />
+            <Route path="/reports" element={<ReportsPage />} />
+            <Route path="/scans" element={<ScansPage />} />
+            <Route path="/users" element={<UsersPage />} />
+            <Route path="/cards" element={<CardsPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+          </Route>
         </Route>
-      </Route>
 
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+    </Suspense>
   );
 }

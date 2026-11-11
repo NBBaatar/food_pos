@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import jwt, { type SignOptions } from 'jsonwebtoken';
 import { env } from '../config/env';
 import type { Role } from '@shared/permissions';
@@ -31,6 +31,16 @@ export function createRefreshToken(): { token: string; hash: string; expiresAt: 
 
 export function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex');
+}
+
+/** Тогтмол хугацаатай харьцуулалт — таамаглах (timing) халдлагаас сэргийлнэ */
+export function safeEqualHex(a: string, b: string): boolean {
+  if (a.length !== b.length || a.length % 2 !== 0) return false;
+  try {
+    return timingSafeEqual(Buffer.from(a, 'hex'), Buffer.from(b, 'hex'));
+  } catch {
+    return false;
+  }
 }
 
 export function createApiKey(): { key: string; hash: string } {

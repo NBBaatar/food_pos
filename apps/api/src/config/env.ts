@@ -22,6 +22,8 @@ const envSchema = z.object({
   ACCESS_TOKEN_TTL: z.string().default('15m'),
   REFRESH_TOKEN_TTL_DAYS: z.coerce.number().int().min(1).default(7),
   WEB_ORIGIN: z.string().default('http://localhost:5173'),
+  /** Proxy-н ард ажиллаж байгаа бол: "1" (hop тоо) эсвэл "true". Хоосон = итгэхгүй. */
+  TRUST_PROXY: z.string().default(''),
   SEED_DEVICE_KEY: z.string().min(8).default('kiosk-dev-key-change-me'),
 });
 

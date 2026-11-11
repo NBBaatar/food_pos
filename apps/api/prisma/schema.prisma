@@ -84,6 +84,7 @@ model User {
   audits       AuditLog[]
 
   @@index([departmentId])
+  @@index([role, status])
   @@map("users")
 }
 
@@ -177,6 +178,7 @@ model ScanEvent {
   @@index([businessDate, periodId])
   @@index([userId, businessDate])
   @@index([cardUid])
+  @@index([receivedAt])
   @@map("scan_events")
 }
 
@@ -199,6 +201,7 @@ model MealRecord {
   createdAt    DateTime   @default(now()) @map("created_at")
 
   @@index([businessDate])
+  @@index([businessDate, periodId])
   @@index([userId, businessDate])
   @@map("meal_records")
 }

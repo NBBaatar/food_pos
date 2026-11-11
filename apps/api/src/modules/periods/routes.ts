@@ -4,7 +4,7 @@ import { PERMISSIONS } from '@shared/permissions';
 import { prisma } from '../../db/prisma';
 import { writeAudit } from '../../lib/audit';
 import { AppError } from '../../lib/errors';
-import { minutesOfDay } from '../../lib/time';
+import { minutesOfDay, windowsOverlap } from '../../lib/time';
 import { parseBody, pathId } from '../../lib/validate';
 import { authenticate } from '../../middleware/auth';
 import { requirePermission } from '../../middleware/rbac';
@@ -45,6 +45,21 @@ router.patch('/:id', requirePermission(PERMISSIONS.PERIOD_MANAGE), async (req, r
   }
   if (crossesMidnight && minutesOfDay(startTime) < minutesOfDay(endTime)) {
     throw new AppError(400, '"Шөнийн" цонх 22:00 → 02:00 гэх мэт 00:00-ийг давах ёстой', 'BAD_WINDOW');
+  }
+
+  // Давхцсан цонх нь нэг уншилтыг хоёр хоол болгож, тайланг буруу болгоно.
+  const willBeActive = input.isActive ?? period.isActive;
+  if (willBeActive) {
+    const others = await prisma.mealPeriod.findMany({ where: { id: { not: period.id }, isActive: true } });
+    const candidate = { startTime, endTime, crossesMidnight };
+    const clash = others.find((other) => windowsOverlap(candidate, other));
+    if (clash) {
+      throw new AppError(
+        409,
+        `«${clash.name}» цонхтой давхцаж байна (${clash.startTime}–${clash.endTime}). Өөр цаг сонгоно уу.`,
+        'WINDOW_OVERLAP',
+      );
+    }
   }
 
   const updated = await prisma.mealPeriod.update({

@@ -1,7 +1,8 @@
 import type { Grouping } from '@shared/meal';
 import type { AttendanceRow, DepartmentReportRow, IntegrityReport, ReportBucketRow } from '@shared/types';
+import { env } from '../../config/env';
 import { prisma } from '../../db/prisma';
-import { addDaysIso, daysBetween } from '../../lib/time';
+import { addDaysIso, businessDateFor, daysBetween } from '../../lib/time';
 
 const TRUNC_UNIT: Record<Grouping, string> = {
   day: 'day',
@@ -107,7 +108,10 @@ async function totals(filters: ReportFilters): Promise<TotalsRow> {
 }
 
 export async function summary(filters: ReportFilters) {
-  const days = daysBetween(filters.from, filters.to);
+  // Ирээдүйн өдрүүдийг дундажид тооцохгүй (тайлан эхлэх өдрөөс өнөөдрийг хүртэл)
+  const businessToday = businessDateFor(new Date(), env.DAY_START_HOUR, env.APP_TIMEZONE);
+  const cappedTo = filters.to > businessToday ? businessToday : filters.to;
+  const days = Math.max(1, daysBetween(filters.from, cappedTo));
   const previousTo = addDaysIso(filters.from, -1);
   const previousFrom = addDaysIso(previousTo, -(days - 1));
 
@@ -226,7 +230,9 @@ export async function integrity(): Promise<IntegrityReport> {
          LEFT JOIN scan_events s ON s.id = m.scan_event_id
         WHERE s.id IS NULL)::int AS "orphanRecords",
       (SELECT COUNT(*) FROM scan_events WHERE decision = 'ALREADY_SCANNED')::int AS "duplicateAttempts",
-      (SELECT COUNT(*) FROM scan_events WHERE abs(COALESCE(clock_skew_ms, 0)) > 300000)::int AS "clockSkewHigh",
+      (SELECT COUNT(*) FROM scan_events
+        WHERE abs(COALESCE(clock_skew_ms, 0)) > 300000
+          AND COALESCE((raw_payload ->> 'backfill')::boolean, false) = false)::int AS "clockSkewHigh",
       (SELECT COUNT(*) FROM scan_events WHERE decision = 'UNKNOWN_CARD')::int AS "unknownCards",
       (SELECT COUNT(*) FROM scan_events WHERE decision = 'OUT_OF_WINDOW')::int AS "outOfWindow"
   `);

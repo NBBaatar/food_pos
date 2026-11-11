@@ -193,7 +193,11 @@ export async function recordScan(input: ScanInput, context: RecordScanContext = 
               periodId: period.id,
               decision: 'ACCEPTED',
               clockSkewMs,
-              rawPayload: { source: input.source, reportedAt: reportedAt.toISOString() },
+              rawPayload: {
+                source: input.source,
+                reportedAt: reportedAt.toISOString(),
+                ...(context.allowBackdated ? { backfill: true } : {}),
+              },
             },
             include: { period: true, user: true },
           });
@@ -264,7 +268,11 @@ export async function recordScan(input: ScanInput, context: RecordScanContext = 
         decision: finalOutcome.decision,
         reason: finalOutcome.reason,
         clockSkewMs,
-        rawPayload: { source: input.source, reportedAt: reportedAt.toISOString() },
+        rawPayload: {
+          source: input.source,
+          reportedAt: reportedAt.toISOString(),
+          ...(context.allowBackdated ? { backfill: true } : {}),
+        },
       },
       include: { period: true, user: true },
     });

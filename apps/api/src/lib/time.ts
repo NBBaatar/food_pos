@@ -100,6 +100,26 @@ export function matchesPeriod(period: Pick<PeriodWindow, 'startTime' | 'endTime'
   return minutes >= start && minutes < end;
 }
 
+/**
+ * Цонхыг 00:00-д таслаж [эхлэх, дуусах) хэсгүүд болгоно.
+ * Шөнийн 22:00–02:00 → [[1320, 1440], [0, 120]].
+ */
+export function windowSegments(period: Pick<PeriodWindow, 'startTime' | 'endTime' | 'crossesMidnight'>): Array<[number, number]> {
+  const start = minutesOfDay(period.startTime);
+  const end = minutesOfDay(period.endTime);
+  return period.crossesMidnight ? [[start, 1440], [0, end]] : [[start, end]];
+}
+
+/** Хоёр цонх давхцаж байна уу (нэг уншилт хоёрт багтах эсэх) */
+export function windowsOverlap(
+  a: Pick<PeriodWindow, 'startTime' | 'endTime' | 'crossesMidnight'>,
+  b: Pick<PeriodWindow, 'startTime' | 'endTime' | 'crossesMidnight'>,
+): boolean {
+  return windowSegments(a).some(([aStart, aEnd]) =>
+    windowSegments(b).some(([bStart, bEnd]) => aStart < bEnd && bStart < aEnd),
+  );
+}
+
 /** Тухайн агшинд тохирох идэвхтэй хоолны цонх */
 export function findPeriod<T extends PeriodWindow>(periods: T[], at: Date, timeZone = TIMEZONE): T | undefined {
   const p = toLocalParts(at, timeZone);

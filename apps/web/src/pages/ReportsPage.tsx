@@ -70,9 +70,10 @@ export function ReportsPage(): JSX.Element {
     setTo(range.to);
   };
 
-  const applyRange = (start: Date, end: Date): void => {
-    setFrom(toISODate(start));
-    setTo(toISODate(end));
+  /** Улаанбаатарын өдрөөр «эхлэх → өнөөдөр» хүрээ тогтооно */
+  const applyStart = (startIso: string): void => {
+    setFrom(startIso);
+    setTo(toISODate());
   };
 
   const exportCsv = async (): Promise<void> => {
@@ -182,10 +183,7 @@ export function ReportsPage(): JSX.Element {
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => {
-              const now = new Date();
-              applyRange(new Date(now.getUTCFullYear(), now.getUTCMonth(), 1), now);
-            }}
+            onClick={() => applyStart(`${toISODate().slice(0, 7)}-01`)}
           >
             Энэ сар
           </Button>
@@ -193,21 +191,15 @@ export function ReportsPage(): JSX.Element {
             variant="ghost"
             size="sm"
             onClick={() => {
-              const now = new Date();
-              const quarterStartMonth = Math.floor(now.getUTCMonth() / 3) * 3;
-              applyRange(new Date(now.getUTCFullYear(), quarterStartMonth, 1), now);
+              const today = toISODate();
+              const [year, month] = today.split('-').map(Number) as [number, number];
+              const quarterStartMonth = Math.floor((month - 1) / 3) * 3 + 1;
+              applyStart(`${year}-${String(quarterStartMonth).padStart(2, '0')}-01`);
             }}
           >
             Энэ улирал
           </Button>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              const now = new Date();
-              applyRange(new Date(now.getUTCFullYear(), 0, 1), now);
-            }}
-          >
+          <Button variant="ghost" size="sm" onClick={() => applyStart(`${toISODate().slice(0, 4)}-01-01`)}>
             Энэ жил
           </Button>
           <label className="ml-auto flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">

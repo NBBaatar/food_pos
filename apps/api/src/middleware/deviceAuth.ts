@@ -1,7 +1,7 @@
 import type { NextFunction, Request, Response } from 'express';
 import { prisma } from '../db/prisma';
 import { AppError } from '../lib/errors';
-import { hashToken } from '../lib/tokens';
+import { hashToken, safeEqualHex } from '../lib/tokens';
 import { authenticate } from './auth';
 
 export async function authenticateOrDevice(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -17,7 +17,7 @@ export async function authenticateOrDevice(req: Request, res: Response, next: Ne
       select: { id: true, code: true, name: true, apiKeyHash: true },
     });
 
-    if (!device || !device.apiKeyHash || device.apiKeyHash !== hashToken(rawKey)) {
+    if (!device || !device.apiKeyHash || !safeEqualHex(device.apiKeyHash, hashToken(rawKey))) {
       throw new AppError(401, 'Төхөөрөмжийн түлхүүр буруу байна', 'BAD_DEVICE_KEY');
     }
 
