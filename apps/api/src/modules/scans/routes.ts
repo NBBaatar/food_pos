@@ -1,11 +1,11 @@
 import { Router } from 'express';
 import { listScansQuerySchema, scanSchema, voidScanSchema } from '@shared/schemas';
 import { PERMISSIONS } from '@shared/permissions';
-import type { Prisma } from '../../generated/prisma/client';
-import { prisma } from '../../db/prisma';
+import { execute, one, query } from '../../db/pool';
 import { writeAudit } from '../../lib/audit';
-import { toScanRow } from '../../lib/dto';
+import { toScanRow, type ScanRowDb } from '../../lib/dto';
 import { AppError } from '../../lib/errors';
+import { limitOffset, param } from '../../lib/sql';
 import { parseBody, parseQuery, pathId } from '../../lib/validate';
 import { authenticate } from '../../middleware/auth';
 import { authenticateOrDevice } from '../../middleware/deviceAuth';
@@ -14,19 +14,36 @@ import { recordScan } from './decision';
 
 const router = Router();
 
-const scanInclude = {
-  user: { select: { firstName: true, lastName: true, employeeNo: true } },
-  period: true,
-  device: true,
-  meal: true,
-} satisfies Prisma.ScanEventInclude;
+const SCAN_SELECT = `
+  SELECT s.id::text AS id,
+         s.card_uid AS "cardUid",
+         s.card_id AS "cardId",
+         s.user_id AS "userId",
+         CASE WHEN u.id IS NULL THEN NULL ELSE u.last_name || ' ' || u.first_name END AS "userName",
+         u.employee_no AS "employeeNo",
+         p.code AS "periodCode",
+         to_char(s.business_date, 'YYYY-MM-DD') AS "businessDate",
+         s.scanned_at AS "scannedAt",
+         s.received_at AS "receivedAt",
+         s.decision,
+         s.reason,
+         d.name AS "deviceName",
+         s.clock_skew_ms AS "clockSkewMs",
+         m.id::text AS "mealId",
+         m.voided_at AS "voidedAt"
+    FROM scan_events s
+    LEFT JOIN users u ON u.id = s.user_id
+    LEFT JOIN meal_periods p ON p.id = s.period_id
+    LEFT JOIN devices d ON d.id = s.device_id
+    LEFT JOIN meal_records m ON m.scan_event_id = s.id
+`;
 
-function parseId(raw: string): bigint {
+function parseId(raw: string): string {
   if (!/^\d+$/.test(raw)) throw new AppError(400, 'Буруу ID', 'BAD_ID');
-  return BigInt(raw);
+  return raw;
 }
 
-/** Кiosk/уншигч: хэрэглэгчийн сесс эсвэл төхөөрөмжийн түлхүүрээр */
+/** Kiosk/уншигч: хэрэглэгчийн сесс эсвэл төхөөрөмжийн түлхүүрээр */
 router.post('/', authenticateOrDevice, async (req, res) => {
   const input = parseBody(scanSchema, req);
   const result = await recordScan(input, {
@@ -37,52 +54,50 @@ router.post('/', authenticateOrDevice, async (req, res) => {
 });
 
 router.get('/', authenticate, requirePermission(PERMISSIONS.SCAN_READ), async (req, res) => {
-  const query = parseQuery(listScansQuerySchema, req);
-  const where: Prisma.ScanEventWhereInput = {
-    ...(query.from || query.to
-      ? {
-          businessDate: {
-            ...(query.from ? { gte: new Date(`${query.from}T00:00:00.000Z`) } : {}),
-            ...(query.to ? { lte: new Date(`${query.to}T00:00:00.000Z`) } : {}),
-          },
-        }
-      : {}),
-    ...(query.decision ? { decision: query.decision } : {}),
-    ...(query.userId ? { userId: query.userId } : {}),
-    ...(query.period ? { period: { code: query.period } } : {}),
-    ...(query.search
-      ? {
-          OR: [
-            { cardUid: { contains: query.search, mode: 'insensitive' } },
-            { user: { firstName: { contains: query.search, mode: 'insensitive' } } },
-            { user: { lastName: { contains: query.search, mode: 'insensitive' } } },
-            { user: { employeeNo: { contains: query.search, mode: 'insensitive' } } },
-          ],
-        }
-      : {}),
-  };
+  const input = parseQuery(listScansQuerySchema, req);
+  const params: unknown[] = [];
+  const where: string[] = [];
 
-  const [total, scans] = await Promise.all([
-    prisma.scanEvent.count({ where }),
-    prisma.scanEvent.findMany({
-      where,
-      include: scanInclude,
-      orderBy: { receivedAt: 'desc' },
-      skip: (query.page - 1) * query.pageSize,
-      take: query.pageSize,
-    }),
+  if (input.from || input.to) {
+    if (input.from) where.push(`s.business_date >= ${param(params, input.from)}::date`);
+    if (input.to) where.push(`s.business_date <= ${param(params, input.to)}::date`);
+  }
+  if (input.decision) where.push(`s.decision = ${param(params, input.decision)}`);
+  if (input.userId) where.push(`s.user_id = ${param(params, input.userId)}::uuid`);
+  if (input.period) where.push(`p.code = ${param(params, input.period)}`);
+  if (input.search) {
+    const like = param(params, `%${input.search}%`);
+    where.push(`(s.card_uid ILIKE ${like}
+      OR u.first_name ILIKE ${like} OR u.last_name ILIKE ${like} OR u.employee_no ILIKE ${like})`);
+  }
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+  const [totalRow, scans] = await Promise.all([
+    one<{ total: number }>(
+      `SELECT COUNT(*)::int AS total
+         FROM scan_events s
+         LEFT JOIN users u ON u.id = s.user_id
+         LEFT JOIN meal_periods p ON p.id = s.period_id
+         ${whereSql}`,
+      params,
+    ),
+    query<ScanRowDb>(
+      `${SCAN_SELECT} ${whereSql} ORDER BY s.received_at DESC ${limitOffset(input.page, input.pageSize)}`,
+      params,
+    ),
   ]);
 
-  res.json({ items: scans.map(toScanRow), page: query.page, pageSize: query.pageSize, total });
+  res.json({
+    items: scans.map(toScanRow),
+    page: input.page,
+    pageSize: input.pageSize,
+    total: totalRow?.total ?? 0,
+  });
 });
 
 /** Dashboard-ын шууд урсгал */
 router.get('/recent', authenticate, requirePermission(PERMISSIONS.SCAN_READ), async (_req, res) => {
-  const scans = await prisma.scanEvent.findMany({
-    include: scanInclude,
-    orderBy: { receivedAt: 'desc' },
-    take: 12,
-  });
+  const scans = await query<ScanRowDb>(`${SCAN_SELECT} ORDER BY s.received_at DESC LIMIT 12`);
   res.json({ items: scans.map(toScanRow) });
 });
 
@@ -91,27 +106,36 @@ router.post('/:id/void', authenticate, requirePermission(PERMISSIONS.SCAN_CORREC
   const id = parseId(pathId(req.params.id));
   const { reason } = parseBody(voidScanSchema, req);
 
-  const scan = await prisma.scanEvent.findUnique({ where: { id }, include: { meal: true } });
+  const scan = await one<{ id: string; mealId: string | null; voidedAt: Date | null }>(
+    `SELECT s.id::text AS id, m.id::text AS "mealId", m.voided_at AS "voidedAt"
+       FROM scan_events s
+       LEFT JOIN meal_records m ON m.scan_event_id = s.id
+      WHERE s.id = $1::bigint`,
+    [id],
+  );
   if (!scan) throw new AppError(404, 'Уншилт олдсонгүй', 'NOT_FOUND');
-  if (!scan.meal) throw new AppError(400, 'Зөвхөн хүлээн авсан уншилтыг цуцална', 'NOT_ACCEPTED');
-  if (scan.meal.voidedAt) throw new AppError(400, 'Энэ бүртгэл аль хэдийн цуцлагдсан', 'ALREADY_VOIDED');
+  if (!scan.mealId) throw new AppError(400, 'Зөвхөн хүлээн авсан уншилтыг цуцална', 'NOT_ACCEPTED');
+  if (scan.voidedAt) throw new AppError(400, 'Энэ бүртгэл аль хэдийн цуцлагдсан', 'ALREADY_VOIDED');
 
-  const meal = await prisma.mealRecord.update({
-    where: { id: scan.meal.id },
-    data: { voidedAt: new Date(), voidedById: req.auth!.id, voidReason: reason },
-  });
+  const voidedAt = new Date();
+  await execute(
+    `UPDATE meal_records
+        SET voided_at = $2, voided_by_id = $3::uuid, void_reason = $4
+      WHERE id = $1::bigint AND voided_at IS NULL`,
+    [scan.mealId, voidedAt, req.auth!.id, reason],
+  );
 
   await writeAudit({
     actorId: req.auth!.id,
     action: 'scan.void',
     entity: 'meal_record',
-    entityId: meal.id.toString(),
+    entityId: scan.mealId,
     before: { voidedAt: null },
-    after: { voidedAt: meal.voidedAt?.toISOString(), reason },
+    after: { voidedAt: voidedAt.toISOString(), reason },
     req,
   });
 
-  res.json({ ok: true, mealId: meal.id.toString() });
+  res.json({ ok: true, mealId: scan.mealId });
 });
 
 export default router;

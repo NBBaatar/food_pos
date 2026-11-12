@@ -2,22 +2,23 @@ import { permissionsForRole, type Role } from '@shared/permissions';
 import type { PeriodCode, ScanDecision } from '@shared/meal';
 import type { AuthUser, CardListItem, ScanRow, UserListItem } from '@shared/types';
 
-interface UserCore {
+export interface UserRow {
   id: string;
   employeeNo: string;
   firstName: string;
   lastName: string;
   email: string;
-  phone?: string | null;
+  phone: string | null;
   role: Role;
   status: 'ACTIVE' | 'INACTIVE';
   departmentId: string | null;
-  department?: { name: string } | null;
+  departmentName: string | null;
+  cardUid: string | null;
+  cardStatus: string | null;
   createdAt: Date;
-  assignments?: { card: { uid: string; status: string } }[];
 }
 
-export function toAuthUser(user: UserCore): AuthUser {
+export function toAuthUser(user: UserRow): AuthUser {
   return {
     id: user.id,
     employeeNo: user.employeeNo,
@@ -27,13 +28,12 @@ export function toAuthUser(user: UserCore): AuthUser {
     role: user.role,
     status: user.status,
     departmentId: user.departmentId,
-    departmentName: user.department?.name ?? null,
+    departmentName: user.departmentName ?? null,
     permissions: permissionsForRole(user.role),
   };
 }
 
-export function toUserListItem(user: UserCore): UserListItem {
-  const active = user.assignments?.[0];
+export function toUserListItem(user: UserRow): UserListItem {
   return {
     id: user.id,
     employeeNo: user.employeeNo,
@@ -44,70 +44,73 @@ export function toUserListItem(user: UserCore): UserListItem {
     role: user.role,
     status: user.status,
     departmentId: user.departmentId,
-    departmentName: user.department?.name ?? null,
-    cardUid: active?.card.uid ?? null,
-    cardStatus: (active?.card.status as UserListItem['cardStatus']) ?? null,
+    departmentName: user.departmentName ?? null,
+    cardUid: user.cardUid ?? null,
+    cardStatus: (user.cardStatus as UserListItem['cardStatus']) ?? null,
     createdAt: user.createdAt.toISOString(),
   };
 }
 
-interface CardCore {
+export interface CardRow {
   id: string;
   uid: string;
   label: string | null;
   status: string;
+  holderId: string | null;
+  holderName: string | null;
+  assignedAt: Date | null;
   createdAt: Date;
-  assignments?: { assignedAt: Date; user: { firstName: string; lastName: string } }[];
 }
 
-export function toCardListItem(card: CardCore): CardListItem {
-  const active = card.assignments?.[0];
+export function toCardListItem(card: CardRow): CardListItem {
   return {
     id: card.id,
     uid: card.uid,
     label: card.label,
     status: card.status as CardListItem['status'],
-    holderId: active ? (active.user as unknown as { id: string }).id ?? null : null,
-    holderName: active ? `${active.user.lastName} ${active.user.firstName}` : null,
-    assignedAt: active ? active.assignedAt.toISOString() : null,
+    holderId: card.holderId ?? null,
+    holderName: card.holderName ?? null,
+    assignedAt: card.assignedAt ? card.assignedAt.toISOString() : null,
     createdAt: card.createdAt.toISOString(),
   };
 }
 
-interface ScanCore {
-  id: bigint;
+export interface ScanRowDb {
+  id: string;
   cardUid: string;
   cardId: string | null;
   userId: string | null;
-  businessDate: Date;
+  userName: string | null;
+  employeeNo: string | null;
+  periodCode: PeriodCode | null;
+  businessDate: string;
   scannedAt: Date;
   receivedAt: Date;
   decision: ScanDecision;
   reason: string | null;
+  deviceName: string | null;
   clockSkewMs: number | null;
-  user?: { firstName: string; lastName: string; employeeNo: string } | null;
-  period?: { code: PeriodCode } | null;
-  device?: { name: string } | null;
-  meal?: { id: bigint; voidedAt: Date | null } | null;
+  mealId: string | null;
+  voidedAt: Date | null;
 }
 
-export function toScanRow(scan: ScanCore): ScanRow {
+export function toScanRow(scan: ScanRowDb): ScanRow {
   return {
-    id: scan.id.toString(),
-    mealId: scan.meal ? scan.meal.id.toString() : null,
-    voidedAt: scan.meal?.voidedAt ? scan.meal.voidedAt.toISOString() : null,
+    id: scan.id,
+    mealId: scan.mealId,
+    voidedAt: scan.voidedAt ? scan.voidedAt.toISOString() : null,
     cardUid: scan.cardUid,
     cardId: scan.cardId,
     userId: scan.userId,
-    userName: scan.user ? `${scan.user.lastName} ${scan.user.firstName}` : null,
-    employeeNo: scan.user?.employeeNo ?? null,
-    periodCode: scan.period?.code ?? null,
-    businessDate: scan.businessDate.toISOString().slice(0, 10),
+    userName: scan.userName,
+    employeeNo: scan.employeeNo,
+    periodCode: scan.periodCode,
+    businessDate: scan.businessDate,
     scannedAt: scan.scannedAt.toISOString(),
     receivedAt: scan.receivedAt.toISOString(),
     decision: scan.decision,
     reason: scan.reason,
-    deviceName: scan.device?.name ?? null,
+    deviceName: scan.deviceName,
     clockSkewMs: scan.clockSkewMs,
   };
 }

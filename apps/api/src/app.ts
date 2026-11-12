@@ -2,7 +2,7 @@ import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import express from 'express';
 import { env } from './config/env';
-import { prisma } from './db/prisma';
+import { query } from './db/pool';
 import { AppError } from './lib/errors';
 import { errorHandler, notFoundHandler } from './middleware/error';
 import { rateLimit } from './middleware/rateLimit';
@@ -53,7 +53,7 @@ app.use(cookieParser());
 app.get('/api/v1/health', async (_req, res) => {
   let db: 'ok' | 'down' = 'ok';
   try {
-    await prisma.$queryRawUnsafe('SELECT 1');
+    await query('SELECT 1');
   } catch {
     db = 'down';
   }

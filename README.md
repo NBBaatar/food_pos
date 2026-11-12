@@ -2,19 +2,21 @@
 
 RFID карт болон уншигчаар өглөө / өдөр / орой / шөнийн хоолыг бүртгэж, өдөр, 7 хоног, сар, улирал, жилээр үнэн зөв тайлан гаргадаг систем.
 
-- **Стек:** Node.js + Express 5 + TypeScript, React 19 + Vite + shadcn/ui (dark luxury glass), PostgreSQL + Prisma 7
+- **Стек:** Node.js + Express 5 + TypeScript, React 19 + Vite + shadcn/ui (dark luxury glass), PostgreSQL 17 + `pg` (ORM-гүй, шууд SQL)
 - **Эрхийн түвшин:** ADMIN (супер), MANAGER (тайлан, мэдээлэл засах), USER (хэрэглэгч нэмэх, картын эрх идэвхгүй болгох)
 
 ## Хурдан эхлэх
 
 ```bash
-# 1. Postgres (төсөл доторх dev кластер, порт 5433)
-pg_ctl -D .pgdata -l .pgdata/server.log -o "-p 5433 -k /tmp" start
+# 1. Homebrew PostgreSQL (нэг удаа)
+brew services start postgresql@17
+createdb food_pos
 
 # 2. Хамаарал ба өгөгдлийн сан
 npm install
-cp .env.example .env          # JWT_SECRET-ээ соль
-npm run db:setup              # schema push + partial index + seed
+cp .env.example .env          # DATABASE_URL, JWT_SECRET-ээ тохируул
+npm run db:setup              # apps/api/db/schema.sql — хүснэгт, индекс, хязгаарлалт
+npm run db:seed               # 3 эрх, 26 карт, 35 хоногийн уншилт
 
 # 3. Хөгжүүлэлт
 npm run dev                   # API :4000, web :5173
@@ -36,9 +38,19 @@ Kiosk төхөөрөмж: код `KIOSK-01`, түлхүүр нь `.env` дахь
 
 ```
 apps/api       Express API (auth, users, cards, periods, scans, reports, devices, audit, jobs)
+apps/api/db    schema.sql (хүснэгт/индекс), setup.ts, seed.ts
 apps/web       React SPA (Самбар, Уншигч, Тайлан, Уншилт, Хэрэглэгч, Карт, Тохиргоо)
 packages/shared  Төрөл, zod схем, эрх, хоолны тогтмол, формат — API ба web хоёуланд
 ```
+
+## Өгөгдлийн сан
+
+ORM ашиглахгүй — `pg` (node-postgres) pool + параметржсэн SQL. Схем нь нэг файлд:
+
+- `apps/api/db/schema.sql` — хүснэгт, `CHECK` хязгаарлалт, индекс, **partial unique index** (давхар уншилт, нэг идэвхтэй карт). Дахин ажиллуулж болно.
+- `npm run db:setup` — схем үүсгэх/шинэчлэх; `npm run db:seed` — demo өгөгдөл; `npm run db:reset` — хоёуланг нь.
+- Холболт: `DATABASE_URL` (жишээ: `postgresql://localhost:5432/food_pos`); нууц үгийг URL-д эсвэл `PGPASSWORD` орчны хувьсагчаар өгнө.
+- Олон мэдэгдэл шаардсан үйлдэл (уншилт бүртгэх) нь `withTransaction()`-оор нэг транзакцад ажиллана; `$1…$n` параметр тул SQL injection-гүй.
 
 ## Нарийвчлалын зарчим
 

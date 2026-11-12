@@ -1,56 +1,74 @@
 import { Router } from 'express';
 import { createUserSchema, listQuerySchema, updateUserSchema } from '@shared/schemas';
 import { PERMISSIONS } from '@shared/permissions';
-import type { Prisma } from '../../generated/prisma/client';
-import { prisma } from '../../db/prisma';
+import { env } from '../../config/env';
+import { execute, one, query, withTransaction } from '../../db/pool';
 import { writeAudit } from '../../lib/audit';
-import { toUserListItem } from '../../lib/dto';
+import { toUserListItem, type UserRow } from '../../lib/dto';
 import { AppError } from '../../lib/errors';
 import { generatePassword, hashPassword } from '../../lib/password';
+import { isUniqueViolation, limitOffset, param } from '../../lib/sql';
 import { addDaysIso, businessDateFor } from '../../lib/time';
 import { parseBody, parseQuery, pathId } from '../../lib/validate';
 import { authenticate } from '../../middleware/auth';
 import { requirePermission } from '../../middleware/rbac';
-import { env } from '../../config/env';
 
 const router = Router();
 router.use(authenticate);
 
-const userInclude = {
-  department: true,
-  assignments: { where: { releasedAt: null }, include: { card: true } },
-} satisfies Prisma.UserInclude;
+const USER_FROM = `
+  FROM users u
+  LEFT JOIN departments d ON d.id = u.department_id
+  LEFT JOIN LATERAL (
+    SELECT c.uid, c.status
+      FROM card_assignments ca
+      JOIN cards c ON c.id = ca.card_id
+     WHERE ca.user_id = u.id AND ca.released_at IS NULL
+     LIMIT 1
+  ) c ON true
+`;
+
+const USER_COLUMNS = `
+  u.id, u.employee_no AS "employeeNo", u.first_name AS "firstName", u.last_name AS "lastName",
+  u.email, u.phone, u.role, u.status, u.department_id AS "departmentId", d.name AS "departmentName",
+  c.uid AS "cardUid", c.status AS "cardStatus", u.created_at AS "createdAt"
+`;
+
+async function findUserById(id: string): Promise<UserRow | null> {
+  return one<UserRow>(`SELECT ${USER_COLUMNS} ${USER_FROM} WHERE u.id = $1::uuid AND u.deleted_at IS NULL`, [id]);
+}
 
 router.get('/', requirePermission(PERMISSIONS.USER_READ), async (req, res) => {
-  const query = parseQuery(listQuerySchema, req);
-  const where: Prisma.UserWhereInput = {
-    deletedAt: null,
-    ...(query.role ? { role: query.role } : {}),
-    ...(query.status ? { status: query.status } : {}),
-    ...(query.search
-      ? {
-          OR: [
-            { firstName: { contains: query.search, mode: 'insensitive' } },
-            { lastName: { contains: query.search, mode: 'insensitive' } },
-            { employeeNo: { contains: query.search, mode: 'insensitive' } },
-            { email: { contains: query.search, mode: 'insensitive' } },
-          ],
-        }
-      : {}),
-  };
+  const input = parseQuery(listQuerySchema, req);
+  const params: unknown[] = [];
+  const where = ['u.deleted_at IS NULL'];
 
-  const [total, users] = await Promise.all([
-    prisma.user.count({ where }),
-    prisma.user.findMany({
-      where,
-      include: userInclude,
-      orderBy: [{ lastName: 'asc' }, { firstName: 'asc' }],
-      skip: (query.page - 1) * query.pageSize,
-      take: query.pageSize,
-    }),
+  if (input.role) where.push(`u.role = ${param(params, input.role)}`);
+  if (input.status) where.push(`u.status = ${param(params, input.status)}`);
+  if (input.search) {
+    const like = param(params, `%${input.search}%`);
+    where.push(
+      `(u.first_name ILIKE ${like} OR u.last_name ILIKE ${like} OR u.employee_no ILIKE ${like} OR u.email ILIKE ${like})`,
+    );
+  }
+  const whereSql = `WHERE ${where.join(' AND ')}`;
+
+  const [totalRow, users] = await Promise.all([
+    one<{ total: number }>(`SELECT COUNT(*)::int AS total FROM users u ${whereSql}`, params),
+    query<UserRow>(
+      `SELECT ${USER_COLUMNS} ${USER_FROM} ${whereSql}
+        ORDER BY u.last_name ASC, u.first_name ASC
+        ${limitOffset(input.page, input.pageSize)}`,
+      params,
+    ),
   ]);
 
-  res.json({ items: users.map(toUserListItem), page: query.page, pageSize: query.pageSize, total });
+  res.json({
+    items: users.map(toUserListItem),
+    page: input.page,
+    pageSize: input.pageSize,
+    total: totalRow?.total ?? 0,
+  });
 });
 
 router.post('/', requirePermission(PERMISSIONS.USER_CREATE), async (req, res) => {
@@ -66,132 +84,150 @@ router.post('/', requirePermission(PERMISSIONS.USER_CREATE), async (req, res) =>
   }
 
   const email = input.email.toLowerCase();
-  const existing = await prisma.user.findFirst({
-    where: { OR: [{ email }, { employeeNo: input.employeeNo }] },
-    select: { id: true, email: true, employeeNo: true },
-  });
-  if (existing) {
-    throw new AppError(409, 'Ийм и-мэйл эсвэл ажилтны дугаар бүртгэгдсэн байна', 'DUPLICATE_USER');
-  }
-
   const temporaryPassword = input.password ?? generatePassword(10);
   const passwordHash = await hashPassword(temporaryPassword);
 
-  const created = await prisma.$transaction(async (tx) => {
-    const user = await tx.user.create({
-      data: {
-        employeeNo: input.employeeNo,
-        firstName: input.firstName,
-        lastName: input.lastName,
-        email,
-        phone: input.phone || null,
-        passwordHash,
-        role: input.role,
-        status: 'ACTIVE',
-        mustChangePassword: !input.password,
-        departmentId: input.departmentId ?? null,
-      },
-      include: userInclude,
+  try {
+    const created = await withTransaction(async (client) => {
+      const userResult = await client.query<{ id: string }>(
+        `INSERT INTO users
+           (employee_no, first_name, last_name, email, phone, password_hash, role, status,
+            must_change_password, department_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'ACTIVE', $8, $9::uuid)
+         RETURNING id`,
+        [
+          input.employeeNo,
+          input.firstName,
+          input.lastName,
+          email,
+          input.phone || null,
+          passwordHash,
+          input.role,
+          !input.password,
+          input.departmentId ?? null,
+        ],
+      );
+      const userId = userResult.rows[0]!.id;
+
+      if (input.cardUid) {
+        const uid = input.cardUid.trim().toUpperCase();
+        const card = await client.query<{ id: string; status: string }>(
+          `INSERT INTO cards (uid, label) VALUES ($1, $2)
+           ON CONFLICT (uid) DO UPDATE SET uid = EXCLUDED.uid
+           RETURNING id, status`,
+          [uid, `${input.lastName} ${input.firstName}`],
+        );
+        const cardRow = card.rows[0]!;
+        if (cardRow.status !== 'ACTIVE') {
+          throw new AppError(400, 'Карт идэвхгүй байна. Өөр карт сонгоно уу.', 'CARD_BLOCKED');
+        }
+        await client.query(
+          `UPDATE card_assignments SET released_at = now()
+            WHERE released_at IS NULL AND (card_id = $1::uuid OR user_id = $2::uuid)`,
+          [cardRow.id, userId],
+        );
+        await client.query(
+          `INSERT INTO card_assignments (card_id, user_id, assigned_by_id)
+           VALUES ($1::uuid, $2::uuid, $3::uuid)`,
+          [cardRow.id, userId, actor.id],
+        );
+      }
+
+      return userId;
     });
 
-    if (input.cardUid) {
-      const uid = input.cardUid.trim().toUpperCase();
-      const card = await tx.card.upsert({
-        where: { uid },
-        update: {},
-        create: { uid, label: `${input.lastName} ${input.firstName}` },
-      });
-      if (card.status !== 'ACTIVE') {
-        throw new AppError(400, 'Карт идэвхгүй байна. Өөр карт сонгоно уу.', 'CARD_BLOCKED');
-      }
-      await tx.cardAssignment.updateMany({
-        where: { OR: [{ cardId: card.id }, { userId: user.id }], releasedAt: null },
-        data: { releasedAt: new Date() },
-      });
-      await tx.cardAssignment.create({
-        data: { cardId: card.id, userId: user.id, assignedById: actor.id },
-      });
+    const user = await findUserById(created);
+    if (!user) throw new AppError(500, 'Хэрэглэгч үүссэнгүй', 'CREATE_FAILED');
+
+    await writeAudit({
+      actorId: actor.id,
+      action: 'user.create',
+      entity: 'user',
+      entityId: user.id,
+      after: { employeeNo: user.employeeNo, role: user.role },
+      req,
+    });
+
+    res.status(201).json({
+      user: toUserListItem(user),
+      temporaryPassword: input.password ? undefined : temporaryPassword,
+    });
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      throw new AppError(409, 'Ийм и-мэйл эсвэл ажилтны дугаар бүртгэгдсэн байна', 'DUPLICATE_USER');
     }
-
-    return tx.user.findUniqueOrThrow({ where: { id: user.id }, include: userInclude });
-  });
-
-  await writeAudit({
-    actorId: actor.id,
-    action: 'user.create',
-    entity: 'user',
-    entityId: created.id,
-    after: { employeeNo: created.employeeNo, role: created.role },
-    req,
-  });
-
-  res.status(201).json({
-    user: toUserListItem(created),
-    temporaryPassword: input.password ? undefined : temporaryPassword,
-  });
+    throw error;
+  }
 });
 
 router.get('/:id', requirePermission(PERMISSIONS.USER_READ), async (req, res) => {
-  const user = await prisma.user.findFirst({
-    where: { id: pathId(req.params.id), deletedAt: null },
-    include: {
-      department: true,
-      assignments: { where: { releasedAt: null }, include: { card: true } },
-    },
-  });
+  const user = await findUserById(pathId(req.params.id));
   if (!user) throw new AppError(404, 'Хэрэглэгч олдсонгүй', 'NOT_FOUND');
 
   const today = businessDateFor(new Date(), env.DAY_START_HOUR);
   const from = addDaysIso(today, -29);
 
   const [byPeriod, recentScans, cards] = await Promise.all([
-    prisma.mealRecord.groupBy({
-      by: ['periodId'],
-      where: {
-        userId: user.id,
-        voidedAt: null,
-        businessDate: { gte: new Date(`${from}T00:00:00.000Z`), lte: new Date(`${today}T00:00:00.000Z`) },
-      },
-      _count: { _all: true },
-    }),
-    prisma.scanEvent.findMany({
-      where: { userId: user.id },
-      include: { period: true },
-      orderBy: { receivedAt: 'desc' },
-      take: 8,
-    }),
-    prisma.cardAssignment.findMany({
-      where: { userId: user.id },
-      include: { card: true },
-      orderBy: { assignedAt: 'desc' },
-    }),
+    query<{ periodCode: string | null; count: number }>(
+      `SELECT p.code AS "periodCode", COUNT(m.id)::int AS count
+         FROM meal_records m
+         JOIN meal_periods p ON p.id = m.period_id
+        WHERE m.user_id = $1::uuid AND m.voided_at IS NULL
+          AND m.business_date BETWEEN $2::date AND $3::date
+        GROUP BY p.code`,
+      [user.id, from, today],
+    ),
+    query<{
+      id: string;
+      decision: string;
+      scannedAt: Date;
+      businessDate: string;
+      periodCode: string | null;
+    }>(
+      `SELECT s.id::text AS id, s.decision, s.scanned_at AS "scannedAt",
+              to_char(s.business_date, 'YYYY-MM-DD') AS "businessDate", p.code AS "periodCode"
+         FROM scan_events s
+         LEFT JOIN meal_periods p ON p.id = s.period_id
+        WHERE s.user_id = $1::uuid
+        ORDER BY s.received_at DESC
+        LIMIT 8`,
+      [user.id],
+    ),
+    query<{
+      id: string;
+      uid: string;
+      status: string;
+      assignedAt: Date;
+      releasedAt: Date | null;
+    }>(
+      `SELECT c.id, c.uid, c.status, ca.assigned_at AS "assignedAt", ca.released_at AS "releasedAt"
+         FROM card_assignments ca
+         JOIN cards c ON c.id = ca.card_id
+        WHERE ca.user_id = $1::uuid
+        ORDER BY ca.assigned_at DESC`,
+      [user.id],
+    ),
   ]);
-
-  const periods = await prisma.mealPeriod.findMany();
-  const periodById = new Map(periods.map((p) => [p.id, p.code]));
 
   res.json({
     user: toUserListItem(user),
     stats: {
-      last30Days: byPeriod.reduce((sum, row) => sum + row._count._all, 0),
-      byPeriod: byPeriod.map((row) => ({
-        periodCode: periodById.get(row.periodId) ?? null,
-        count: row._count._all,
-      })),
+      last30Days: byPeriod.reduce((sum, row) => sum + row.count, 0),
+      byPeriod: byPeriod.map((row) => ({ periodCode: row.periodCode, count: row.count })),
     },
-    cards: cards.map((assignment) => ({
-      id: assignment.card.id,
-      uid: assignment.card.uid,
-      status: assignment.card.status,
-      assignedAt: assignment.assignedAt.toISOString(),
-      releasedAt: assignment.releasedAt ? assignment.releasedAt.toISOString() : null,
+    cards: cards.map((card) => ({
+      id: card.id,
+      uid: card.uid,
+      status: card.status,
+      assignedAt: card.assignedAt.toISOString(),
+      releasedAt: card.releasedAt ? card.releasedAt.toISOString() : null,
     })),
     recentScans: recentScans.map((scan) => ({
-      id: scan.id.toString(),
+      id: scan.id,
       decision: scan.decision,
       scannedAt: scan.scannedAt.toISOString(),
-      businessDate: scan.businessDate.toISOString().slice(0, 10),
-      periodCode: scan.period?.code ?? null,
+      businessDate: scan.businessDate,
+      periodCode: scan.periodCode,
     })),
   });
 });
@@ -199,7 +235,10 @@ router.get('/:id', requirePermission(PERMISSIONS.USER_READ), async (req, res) =>
 router.patch('/:id', requirePermission(PERMISSIONS.USER_UPDATE), async (req, res) => {
   const input = parseBody(updateUserSchema, req);
   const actor = req.auth!;
-  const target = await prisma.user.findFirst({ where: { id: pathId(req.params.id), deletedAt: null } });
+  const target = await one<{ id: string; role: string; status: string; email: string }>(
+    'SELECT id, role, status, email FROM users WHERE id = $1::uuid AND deleted_at IS NULL',
+    [pathId(req.params.id)],
+  );
   if (!target) throw new AppError(404, 'Хэрэглэгч олдсонгүй', 'NOT_FOUND');
 
   if (actor.role !== 'ADMIN' && (target.role === 'ADMIN' || input.role === 'ADMIN')) {
@@ -209,24 +248,37 @@ router.patch('/:id', requirePermission(PERMISSIONS.USER_UPDATE), async (req, res
     throw new AppError(400, 'Өөрийн эрхийг өөрчлөх боломжгүй', 'SELF_ROLE');
   }
 
-  const data: Prisma.UserUpdateInput = {
-    ...(input.firstName ? { firstName: input.firstName } : {}),
-    ...(input.lastName ? { lastName: input.lastName } : {}),
-    ...(input.email ? { email: input.email.toLowerCase() } : {}),
-    ...(input.phone !== undefined ? { phone: input.phone || null } : {}),
-    ...(input.role ? { role: input.role } : {}),
-    ...(input.status ? { status: input.status } : {}),
-    ...(input.departmentId !== undefined
-      ? input.departmentId
-        ? { department: { connect: { id: input.departmentId } } }
-        : { department: { disconnect: true } }
-      : {}),
-    ...(input.password
-      ? { passwordHash: await hashPassword(input.password), mustChangePassword: false }
-      : {}),
-  };
+  const params: unknown[] = [];
+  const sets: string[] = [];
+  if (input.firstName) sets.push(`first_name = ${param(params, input.firstName)}`);
+  if (input.lastName) sets.push(`last_name = ${param(params, input.lastName)}`);
+  if (input.email) sets.push(`email = ${param(params, input.email.toLowerCase())}`);
+  if (input.phone !== undefined) sets.push(`phone = ${param(params, input.phone || null)}`);
+  if (input.role) sets.push(`role = ${param(params, input.role)}`);
+  if (input.status) sets.push(`status = ${param(params, input.status)}`);
+  if (input.departmentId !== undefined) {
+    sets.push(`department_id = ${param(params, input.departmentId || null)}::uuid`);
+  }
+  if (input.password) {
+    sets.push(`password_hash = ${param(params, await hashPassword(input.password))}`);
+    sets.push('must_change_password = false');
+  }
+  if (sets.length === 0) throw new AppError(400, 'Өөрчлөх талбар байхгүй', 'NO_CHANGES');
 
-  const updated = await prisma.user.update({ where: { id: target.id }, data, include: userInclude });
+  sets.push('updated_at = now()');
+  const targetParam = param(params, target.id);
+
+  try {
+    await execute(`UPDATE users SET ${sets.join(', ')} WHERE id = ${targetParam}::uuid`, params);
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      throw new AppError(409, 'Ийм и-мэйл бүртгэгдсэн байна', 'DUPLICATE_EMAIL');
+    }
+    throw error;
+  }
+
+  const updated = await findUserById(target.id);
+  if (!updated) throw new AppError(404, 'Хэрэглэгч олдсонгүй', 'NOT_FOUND');
 
   await writeAudit({
     actorId: actor.id,
@@ -243,7 +295,10 @@ router.patch('/:id', requirePermission(PERMISSIONS.USER_UPDATE), async (req, res
 
 router.patch('/:id/status', requirePermission(PERMISSIONS.USER_DEACTIVATE), async (req, res) => {
   const actor = req.auth!;
-  const target = await prisma.user.findFirst({ where: { id: pathId(req.params.id), deletedAt: null } });
+  const target = await one<{ id: string; role: string; status: 'ACTIVE' | 'INACTIVE' }>(
+    'SELECT id, role, status FROM users WHERE id = $1::uuid AND deleted_at IS NULL',
+    [pathId(req.params.id)],
+  );
   if (!target) throw new AppError(404, 'Хэрэглэгч олдсонгүй', 'NOT_FOUND');
   if (target.id === actor.id) throw new AppError(400, 'Өөрийгөө идэвхгүй болгох боломжгүй', 'SELF');
   if (target.role === 'ADMIN' && actor.role !== 'ADMIN') {
@@ -251,18 +306,16 @@ router.patch('/:id/status', requirePermission(PERMISSIONS.USER_DEACTIVATE), asyn
   }
 
   const nextStatus = target.status === 'ACTIVE' ? 'INACTIVE' : 'ACTIVE';
-  const updated = await prisma.user.update({
-    where: { id: target.id },
-    data: { status: nextStatus },
-    include: userInclude,
-  });
+  await execute('UPDATE users SET status = $1, updated_at = now() WHERE id = $2::uuid', [nextStatus, target.id]);
 
   if (nextStatus === 'INACTIVE') {
-    await prisma.refreshToken.updateMany({
-      where: { userId: target.id, revokedAt: null },
-      data: { revokedAt: new Date() },
-    });
+    await execute('UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1::uuid AND revoked_at IS NULL', [
+      target.id,
+    ]);
   }
+
+  const updated = await findUserById(target.id);
+  if (!updated) throw new AppError(404, 'Хэрэглэгч олдсонгүй', 'NOT_FOUND');
 
   await writeAudit({
     actorId: actor.id,
@@ -279,18 +332,24 @@ router.patch('/:id/status', requirePermission(PERMISSIONS.USER_DEACTIVATE), asyn
 
 router.post('/:id/reset-password', requirePermission(PERMISSIONS.USER_UPDATE), async (req, res) => {
   const actor = req.auth!;
-  const target = await prisma.user.findFirst({ where: { id: pathId(req.params.id), deletedAt: null } });
+  const target = await one<{ id: string; role: string }>(
+    'SELECT id, role FROM users WHERE id = $1::uuid AND deleted_at IS NULL',
+    [pathId(req.params.id)],
+  );
   if (!target) throw new AppError(404, 'Хэрэглэгч олдсонгүй', 'NOT_FOUND');
   if (target.role === 'ADMIN' && actor.role !== 'ADMIN') {
     throw new AppError(403, 'Админы нууц үгийг сэргээх эрх хүрэхгүй', 'FORBIDDEN');
   }
 
   const temporaryPassword = generatePassword(10);
-  await prisma.user.update({
-    where: { id: target.id },
-    data: { passwordHash: await hashPassword(temporaryPassword), mustChangePassword: true },
-  });
-  await prisma.refreshToken.updateMany({ where: { userId: target.id, revokedAt: null }, data: { revokedAt: new Date() } });
+  await execute(
+    `UPDATE users SET password_hash = $1, must_change_password = true, updated_at = now()
+      WHERE id = $2::uuid`,
+    [await hashPassword(temporaryPassword), target.id],
+  );
+  await execute('UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1::uuid AND revoked_at IS NULL', [
+    target.id,
+  ]);
   await writeAudit({ actorId: actor.id, action: 'user.reset_password', entity: 'user', entityId: target.id, req });
 
   res.json({ temporaryPassword });

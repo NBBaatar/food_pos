@@ -13,7 +13,8 @@ for (const candidate of ['.env', '../../.env']) {
 }
 
 const envSchema = z.object({
-  DATABASE_URL: z.string().min(1, 'DATABASE_URL шаардлагатай'),
+  /** Homebrew/local Postgres. Нууц үг оруулахгүй бол pg нь PGPASSWORD-ыг уншина. */
+  DATABASE_URL: z.string().min(1).default('postgresql://localhost:5432/food_pos'),
   PORT: z.coerce.number().int().default(4000),
   NODE_ENV: z.string().default('development'),
   APP_TIMEZONE: z.string().default('Asia/Ulaanbaatar'),

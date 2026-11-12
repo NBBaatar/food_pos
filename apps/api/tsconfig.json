@@ -6,5 +6,5 @@
       "@shared/*": ["../../packages/shared/src/*"]
     }
   },
-  "include": ["src/**/*.ts", "prisma/**/*.ts", "tests/**/*.ts"]
+  "include": ["src/**/*.ts", "db/**/*.ts", "tests/**/*.ts"]
 }

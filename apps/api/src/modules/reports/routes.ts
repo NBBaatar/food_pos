@@ -3,7 +3,7 @@ import { reportQuerySchema, type ReportQuery } from '@shared/schemas';
 import { PERIOD_FULL_LABELS, PERIOD_CODES, type Grouping } from '@shared/meal';
 import { PERMISSIONS } from '@shared/permissions';
 import { env } from '../../config/env';
-import { prisma } from '../../db/prisma';
+import { query } from '../../db/pool';
 import { addDaysIso, businessDateFor } from '../../lib/time';
 import { AppError } from '../../lib/errors';
 import { parseQuery } from '../../lib/validate';
@@ -74,7 +74,7 @@ router.get('/integrity', requirePermission(PERMISSIONS.REPORT_READ), async (_req
 router.get('/today', requirePermission(PERMISSIONS.REPORT_READ), async (_req, res) => {
   const today = businessToday();
   const [rows, trend, periods, totals] = await Promise.all([
-    prisma.$queryRawUnsafe<{ code: string; count: number }[]>(
+    query<{ code: string; count: number }>(
       `
       SELECT p.code::text AS code, COUNT(m.id)::int AS count
       FROM meal_records m
@@ -82,14 +82,25 @@ router.get('/today', requirePermission(PERMISSIONS.REPORT_READ), async (_req, re
       WHERE m.business_date = $1::date AND m.voided_at IS NULL
       GROUP BY p.code
       `,
-      today,
+      [today],
     ),
     mealCounts('day', { from: addDaysIso(today, -6), to: today }),
-    prisma.mealPeriod.findMany({ orderBy: { sortOrder: 'asc' } }),
-    prisma.$queryRawUnsafe<{ total: number; holders: number }[]>(
+    query<{
+      code: string;
+      name: string;
+      startTime: string;
+      endTime: string;
+      crossesMidnight: boolean;
+      isActive: boolean;
+    }>(
+      `SELECT code, name, start_time AS "startTime", end_time AS "endTime",
+              crosses_midnight AS "crossesMidnight", is_active AS "isActive"
+         FROM meal_periods ORDER BY sort_order ASC`,
+    ),
+    query<{ total: number; holders: number }>(
       `SELECT COUNT(*)::int AS total, COUNT(DISTINCT user_id)::int AS holders
          FROM meal_records WHERE business_date = $1::date AND voided_at IS NULL`,
-      today,
+      [today],
     ),
   ]);
 
@@ -101,14 +112,7 @@ router.get('/today', requirePermission(PERMISSIONS.REPORT_READ), async (_req, re
     total: totals[0]?.total ?? 0,
     holders: totals[0]?.holders ?? 0,
     byPeriod: todayCounts,
-    periods: periods.map((p) => ({
-      code: p.code,
-      name: p.name,
-      startTime: p.startTime,
-      endTime: p.endTime,
-      crossesMidnight: p.crossesMidnight,
-      isActive: p.isActive,
-    })),
+    periods,
     trend,
   });
 });

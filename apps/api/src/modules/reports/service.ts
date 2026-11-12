@@ -1,7 +1,7 @@
 import type { Grouping } from '@shared/meal';
 import type { AttendanceRow, DepartmentReportRow, IntegrityReport, ReportBucketRow } from '@shared/types';
 import { env } from '../../config/env';
-import { prisma } from '../../db/prisma';
+import { query } from '../../db/pool';
 import { addDaysIso, businessDateFor, daysBetween } from '../../lib/time';
 
 const TRUNC_UNIT: Record<Grouping, string> = {
@@ -68,8 +68,7 @@ export async function mealCounts(groupBy: Grouping, filters: ReportFilters): Pro
     ORDER BY s.bucket
   `;
 
-  return prisma.$queryRawUnsafe<ReportBucketRow[]>(
-    sql,
+  return query<ReportBucketRow>(sql, [
     TRUNC_UNIT[groupBy],
     filters.from,
     filters.to,
@@ -78,7 +77,7 @@ export async function mealCounts(groupBy: Grouping, filters: ReportFilters): Pro
     filters.period ?? null,
     filters.userId ?? null,
     filters.departmentId ?? null,
-  );
+  ]);
 }
 
 interface TotalsRow {
@@ -87,7 +86,7 @@ interface TotalsRow {
 }
 
 async function totals(filters: ReportFilters): Promise<TotalsRow> {
-  const rows = await prisma.$queryRawUnsafe<TotalsRow[]>(
+  const rows = await query<TotalsRow>(
     `
     SELECT COUNT(m.id)::int AS total, COUNT(DISTINCT m.user_id)::int AS "uniqueUsers"
     FROM meal_records m
@@ -97,12 +96,7 @@ async function totals(filters: ReportFilters): Promise<TotalsRow> {
       AND ($5::uuid IS NULL OR m.user_id = $5::uuid)
       AND ($6::uuid IS NULL OR m.user_id IN (SELECT id FROM users WHERE department_id = $6::uuid))
     `,
-    filters.from,
-    filters.to,
-    filters.includeVoided ?? false,
-    filters.period ?? null,
-    filters.userId ?? null,
-    filters.departmentId ?? null,
+    [filters.from, filters.to, filters.includeVoided ?? false, filters.period ?? null, filters.userId ?? null, filters.departmentId ?? null],
   );
   return rows[0] ?? { total: 0, uniqueUsers: 0 };
 }
@@ -118,7 +112,7 @@ export async function summary(filters: ReportFilters) {
   const [current, previous, byPeriodRows] = await Promise.all([
     totals(filters),
     totals({ ...filters, from: previousFrom, to: previousTo }),
-    prisma.$queryRawUnsafe<{ code: string; count: number }[]>(
+    query<{ code: string; count: number }>(
       `
       SELECT p.code::text AS code, COUNT(m.id)::int AS count
       FROM meal_records m
@@ -129,11 +123,7 @@ export async function summary(filters: ReportFilters) {
         AND ($5::uuid IS NULL OR m.user_id IN (SELECT id FROM users WHERE department_id = $5::uuid))
       GROUP BY p.code
       `,
-      filters.from,
-      filters.to,
-      filters.includeVoided ?? false,
-      filters.userId ?? null,
-      filters.departmentId ?? null,
+      [filters.from, filters.to, filters.includeVoided ?? false, filters.userId ?? null, filters.departmentId ?? null],
     ),
   ]);
 
@@ -157,7 +147,7 @@ export async function summary(filters: ReportFilters) {
 }
 
 export async function attendance(filters: ReportFilters): Promise<AttendanceRow[]> {
-  return prisma.$queryRawUnsafe<AttendanceRow[]>(
+  return query<AttendanceRow>(
     `
     SELECT
       u.id::text AS "userId",
@@ -184,16 +174,12 @@ export async function attendance(filters: ReportFilters): Promise<AttendanceRow[
     ORDER BY total DESC, u.last_name ASC
     LIMIT 1000
     `,
-    filters.from,
-    filters.to,
-    filters.includeVoided ?? false,
-    filters.departmentId ?? null,
-    filters.period ?? null,
+    [filters.from, filters.to, filters.includeVoided ?? false, filters.departmentId ?? null, filters.period ?? null],
   );
 }
 
 export async function byDepartment(filters: ReportFilters): Promise<DepartmentReportRow[]> {
-  return prisma.$queryRawUnsafe<DepartmentReportRow[]>(
+  return query<DepartmentReportRow>(
     `
     SELECT
       d.id::text AS "departmentId",
@@ -210,16 +196,12 @@ export async function byDepartment(filters: ReportFilters): Promise<DepartmentRe
     GROUP BY d.id, d.name
     ORDER BY meals DESC
     `,
-    filters.from,
-    filters.to,
-    filters.includeVoided ?? false,
+    [filters.from, filters.to, filters.includeVoided ?? false],
   );
 }
 
 export async function integrity(): Promise<IntegrityReport> {
-  const rows = await prisma.$queryRawUnsafe<
-    Omit<IntegrityReport, 'generatedAt'>[]
-  >(`
+  const rows = await query<Omit<IntegrityReport, 'generatedAt'>>(`
     SELECT
       (SELECT COUNT(*) FROM scan_events WHERE decision = 'ACCEPTED')::int AS "scanAccepted",
       (SELECT COUNT(*) FROM meal_records)::int AS "mealRecords",

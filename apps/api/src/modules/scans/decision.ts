@@ -2,9 +2,9 @@ import type { ScanInput } from '@shared/schemas';
 import { PERIOD_FULL_LABELS, type PeriodCode } from '@shared/meal';
 import type { ScanResult } from '@shared/types';
 import { env } from '../../config/env';
-import { prisma } from '../../db/prisma';
-import { Prisma } from '../../generated/prisma/client';
-import { businessDateFor, findPeriod, localClock } from '../../lib/time';
+import { execute, one, query, withTransaction } from '../../db/pool';
+import { isUniqueViolation } from '../../lib/sql';
+import { businessDateFor, findPeriod, localClock, type PeriodWindow } from '../../lib/time';
 
 /** Төхөөрөмжийн цаг серверийн цагаас 5 минутаас их зөрвөл серверийн цагийг барина */
 const CLOCK_SKEW_TOLERANCE_MS = 5 * 60 * 1000;
@@ -16,7 +16,36 @@ export interface RecordScanContext {
   allowBackdated?: boolean;
 }
 
-function messageFor(decision: ScanResult['decision'], opts: { name?: string; period?: string; clock?: string }): string {
+type Decision = ScanResult['decision'];
+
+interface PeriodRow extends PeriodWindow {
+  id: string;
+  name: string;
+}
+
+interface CardRow {
+  cardId: string;
+  cardStatus: string;
+  blockReason: string | null;
+  userId: string | null;
+  firstName: string | null;
+  lastName: string | null;
+  employeeNo: string | null;
+  userStatus: string | null;
+  deletedAt: Date | null;
+}
+
+interface ScanLike {
+  decision: string;
+  businessDate: string;
+  scannedAt: Date;
+  cardUid: string;
+  periodCode: PeriodCode | null;
+  userName: string | null;
+  employeeNo: string | null;
+}
+
+function messageFor(decision: Decision, opts: { name?: string; period?: string; clock?: string }): string {
   switch (decision) {
     case 'ACCEPTED':
       return `${opts.name ?? ''} — ${opts.period ?? ''} бүртгэгдлээ`;
@@ -37,17 +66,37 @@ function messageFor(decision: ScanResult['decision'], opts: { name?: string; per
   }
 }
 
-interface ScanOutcome {
-  decision: ScanResult['decision'];
-  businessDate: string;
-  scannedAt: Date;
-  periodCode: PeriodCode | null;
-  periodId: string | null;
-  userId: string | null;
-  userName: string | null;
-  employeeNo: string | null;
-  cardId: string | null;
-  reason: string | null;
+function toResult(scan: ScanLike): ScanResult {
+  return {
+    decision: scan.decision as Decision,
+    message: messageFor(scan.decision as Decision, {
+      name: scan.userName ?? undefined,
+      period: scan.periodCode ? PERIOD_FULL_LABELS[scan.periodCode] : undefined,
+    }),
+    businessDate: scan.businessDate,
+    scannedAt: scan.scannedAt.toISOString(),
+    periodCode: scan.periodCode,
+    userName: scan.userName,
+    employeeNo: scan.employeeNo,
+    cardUid: scan.cardUid,
+  };
+}
+
+async function findExistingByKey(idempotencyKey: string): Promise<ScanLike | null> {
+  return one<ScanLike>(
+    `SELECT s.decision,
+            to_char(s.business_date, 'YYYY-MM-DD') AS "businessDate",
+            s.scanned_at AS "scannedAt",
+            s.card_uid AS "cardUid",
+            p.code AS "periodCode",
+            CASE WHEN u.id IS NULL THEN NULL ELSE u.last_name || ' ' || u.first_name END AS "userName",
+            u.employee_no AS "employeeNo"
+       FROM scan_events s
+       LEFT JOIN meal_periods p ON p.id = s.period_id
+       LEFT JOIN users u ON u.id = s.user_id
+      WHERE s.idempotency_key = $1`,
+    [idempotencyKey],
+  );
 }
 
 export async function recordScan(input: ScanInput, context: RecordScanContext = {}): Promise<ScanResult> {
@@ -62,254 +111,203 @@ export async function recordScan(input: ScanInput, context: RecordScanContext = 
     !context.allowBackdated && Math.abs(clockSkewMs) > CLOCK_SKEW_TOLERANCE_MS ? serverNow : reportedAt;
 
   const businessDateIso = businessDateFor(effectiveAt, env.DAY_START_HOUR, env.APP_TIMEZONE);
+  const rawPayload = JSON.stringify({
+    source: input.source,
+    reportedAt: reportedAt.toISOString(),
+    ...(context.allowBackdated ? { backfill: true } : {}),
+  });
 
   // Idempotency: ижил түлхүүрээр дахин ирвэл өмнөх хариуг буцаана
   if (input.idempotencyKey) {
-    const existing = await prisma.scanEvent.findUnique({
-      where: { idempotencyKey: input.idempotencyKey },
-      include: { period: true, user: true },
-    });
-    if (existing) return toResult(existing, existing.period?.code ?? null);
+    const existing = await findExistingByKey(input.idempotencyKey);
+    if (existing) return toResult(existing);
   }
 
-  const periods = await prisma.mealPeriod.findMany({ orderBy: { sortOrder: 'asc' } });
+  const periods = await query<PeriodRow>(
+    `SELECT id, code, name, start_time AS "startTime", end_time AS "endTime",
+            crosses_midnight AS "crossesMidnight", is_active AS "isActive"
+       FROM meal_periods
+      ORDER BY sort_order ASC`,
+  );
   const period = findPeriod(periods, effectiveAt, env.APP_TIMEZONE);
 
-  const card = await prisma.card.findUnique({
-    where: { uid: cardUid },
-    include: {
-      assignments: {
-        where: { releasedAt: null },
-        include: { user: true },
-        take: 1,
-      },
-    },
-  });
+  const card = await one<CardRow>(
+    `SELECT c.id AS "cardId", c.status AS "cardStatus", c.block_reason AS "blockReason",
+            u.id AS "userId", u.first_name AS "firstName", u.last_name AS "lastName",
+            u.employee_no AS "employeeNo", u.status AS "userStatus", u.deleted_at AS "deletedAt"
+       FROM cards c
+       LEFT JOIN LATERAL (
+         SELECT ca.user_id
+           FROM card_assignments ca
+          WHERE ca.card_id = c.id AND ca.released_at IS NULL
+          LIMIT 1
+       ) a ON true
+       LEFT JOIN users u ON u.id = a.user_id
+      WHERE upper(c.uid) = $1`,
+    [cardUid],
+  );
 
-  const assignment = card?.assignments[0];
-  const user = assignment?.user ?? null;
-  const userName = user ? `${user.lastName} ${user.firstName}` : null;
+  const user = card?.userId
+    ? { id: card.userId, firstName: card.firstName ?? '', lastName: card.lastName ?? '', employeeNo: card.employeeNo ?? '' }
+    : null;
+  const userName = user ? `${user.lastName} ${user.firstName}`.trim() : null;
 
-  let outcome!: ScanOutcome;
+  let outcome: ScanLike;
+  let outcomeReason: string | null = null;
+  let outcomeCardId: string | null = null;
+  let outcomeUserId: string | null = null;
 
   if (!period) {
     outcome = {
       decision: 'OUT_OF_WINDOW',
       businessDate: businessDateIso,
       scannedAt: effectiveAt,
+      cardUid,
       periodCode: null,
-      periodId: null,
-      userId: user?.id ?? null,
       userName,
       employeeNo: user?.employeeNo ?? null,
-      cardId: card?.id ?? null,
-      reason: `Локал цаг ${localClock(effectiveAt, env.APP_TIMEZONE)}`,
     };
+    outcomeReason = `Локал цаг ${localClock(effectiveAt, env.APP_TIMEZONE)}`;
+    outcomeCardId = card?.cardId ?? null;
+    outcomeUserId = user?.id ?? null;
   } else if (!card) {
     outcome = {
       decision: 'UNKNOWN_CARD',
       businessDate: businessDateIso,
       scannedAt: effectiveAt,
+      cardUid,
       periodCode: period.code,
-      periodId: period.id,
-      userId: null,
       userName: null,
       employeeNo: null,
-      cardId: null,
-      reason: `UID ${cardUid}`,
     };
-  } else if (card.status !== 'ACTIVE') {
-    outcome = {
-      decision: 'BLOCKED_CARD',
+    outcomeReason = `UID ${cardUid}`;
+  } else {
+    outcomeCardId = card.cardId;
+    outcomeUserId = user?.id ?? null;
+    const base = {
       businessDate: businessDateIso,
       scannedAt: effectiveAt,
+      cardUid,
       periodCode: period.code,
-      periodId: period.id,
-      userId: user?.id ?? null,
       userName,
       employeeNo: user?.employeeNo ?? null,
-      cardId: card.id,
-      reason: card.blockReason ?? card.status,
     };
-  } else if (!assignment || !user) {
-    outcome = {
-      decision: 'NO_ACTIVE_CARD',
-      businessDate: businessDateIso,
-      scannedAt: effectiveAt,
-      periodCode: period.code,
-      periodId: period.id,
-      userId: null,
-      userName: null,
-      employeeNo: null,
-      cardId: card.id,
-      reason: 'Идэвхтэй оноолт байхгүй',
-    };
-  } else if (user.status !== 'ACTIVE' || user.deletedAt) {
-    outcome = {
-      decision: 'INACTIVE_USER',
-      businessDate: businessDateIso,
-      scannedAt: effectiveAt,
-      periodCode: period.code,
-      periodId: period.id,
-      userId: user.id,
-      userName,
-      employeeNo: user.employeeNo,
-      cardId: card.id,
-      reason: 'Хэрэглэгч идэвхгүй',
-    };
-  } else {
-    const businessDate = new Date(`${businessDateIso}T00:00:00.000Z`);
-    const existingMeal = await prisma.mealRecord.findFirst({
-      where: { userId: user.id, businessDate, periodId: period.id, voidedAt: null },
-      select: { id: true },
-    });
 
-    if (existingMeal) {
-      outcome = {
-        decision: 'ALREADY_SCANNED',
-        businessDate: businessDateIso,
-        scannedAt: effectiveAt,
-        periodCode: period.code,
-        periodId: period.id,
-        userId: user.id,
-        userName,
-        employeeNo: user.employeeNo,
-        cardId: card.id,
-        reason: `Meal #${existingMeal.id.toString()}`,
-      };
+    if (card.cardStatus !== 'ACTIVE') {
+      outcome = { ...base, decision: 'BLOCKED_CARD' };
+      outcomeReason = card.blockReason ?? card.cardStatus;
+    } else if (!user) {
+      outcome = { ...base, decision: 'NO_ACTIVE_CARD' };
+      outcomeReason = 'Идэвхтэй оноолт байхгүй';
+      outcomeUserId = null;
+    } else if (card.userStatus !== 'ACTIVE' || card.deletedAt) {
+      outcome = { ...base, decision: 'INACTIVE_USER' };
+      outcomeReason = 'Хэрэглэгч идэвхгүй';
     } else {
-      // Хүлээн авах оролдлого — DB-ийн partial unique index эцсийн хамгаалалт болно
-      try {
-        const accepted = await prisma.$transaction(async (tx) => {
-          const scanEvent = await tx.scanEvent.create({
-            data: {
-              idempotencyKey: input.idempotencyKey ?? null,
-              deviceId: context.deviceId ?? null,
-              cardUid,
-              cardId: card.id,
-              userId: user.id,
-              scannedAt: effectiveAt,
-              businessDate,
-              periodId: period.id,
-              decision: 'ACCEPTED',
-              clockSkewMs,
-              rawPayload: {
-                source: input.source,
-                reportedAt: reportedAt.toISOString(),
-                ...(context.allowBackdated ? { backfill: true } : {}),
-              },
-            },
-            include: { period: true, user: true },
-          });
-          await tx.mealRecord.create({
-            data: {
-              scanEventId: scanEvent.id,
-              userId: user.id,
-              cardId: card.id,
-              periodId: period.id,
-              businessDate,
-              scannedAt: effectiveAt,
-              source: input.source,
-            },
-          });
-          return scanEvent;
-        });
+      const existingMeal = await one<{ id: string }>(
+        `SELECT id::text AS id FROM meal_records
+          WHERE user_id = $1::uuid AND business_date = $2::date AND period_id = $3::uuid
+            AND voided_at IS NULL
+          LIMIT 1`,
+        [user.id, businessDateIso, period.id],
+      );
 
-        await prisma.device
-          .update({ where: { id: context.deviceId ?? '' }, data: { lastSeenAt: new Date() } })
-          .catch(() => undefined);
+      if (existingMeal) {
+        outcome = { ...base, decision: 'ALREADY_SCANNED' };
+        outcomeReason = `Meal #${existingMeal.id}`;
+      } else {
+        // Хүлээн авах оролдлого — DB-ийн partial unique index эцсийн хамгаалалт болно
+        try {
+          await withTransaction(async (client) => {
+            const scan = await client.query<{ id: string }>(
+              `INSERT INTO scan_events
+                 (idempotency_key, device_id, card_uid, card_id, user_id, scanned_at, business_date,
+                  period_id, decision, clock_skew_ms, raw_payload)
+               VALUES ($1, $2::uuid, $3, $4::uuid, $5::uuid, $6, $7::date, $8::uuid, 'ACCEPTED', $9, $10::jsonb)
+               RETURNING id::text AS id`,
+              [
+                input.idempotencyKey ?? null,
+                context.deviceId ?? null,
+                cardUid,
+                card.cardId,
+                user.id,
+                effectiveAt,
+                businessDateIso,
+                period.id,
+                clockSkewMs,
+                rawPayload,
+              ],
+            );
+            await client.query(
+              `INSERT INTO meal_records
+                 (scan_event_id, user_id, card_id, period_id, business_date, scanned_at, source)
+               VALUES ($1::bigint, $2::uuid, $3::uuid, $4::uuid, $5::date, $6, $7)`,
+              [scan.rows[0]!.id, user.id, card.cardId, period.id, businessDateIso, effectiveAt, input.source],
+            );
+          });
 
-        return {
-          decision: 'ACCEPTED',
-          message: messageFor('ACCEPTED', {
-            name: userName ?? undefined,
-            period: PERIOD_FULL_LABELS[period.code as PeriodCode],
-          }),
-          businessDate: businessDateIso,
-          scannedAt: effectiveAt.toISOString(),
-          periodCode: period.code as PeriodCode,
-          userName,
-          employeeNo: user.employeeNo,
-          cardUid,
-        };
-      } catch (error) {
-        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
-          outcome = {
-            decision: 'ALREADY_SCANNED',
+          if (context.deviceId) {
+            await execute('UPDATE devices SET last_seen_at = now() WHERE id = $1::uuid', [context.deviceId]).catch(
+              () => undefined,
+            );
+          }
+
+          return {
+            decision: 'ACCEPTED',
+            message: messageFor('ACCEPTED', {
+              name: userName ?? undefined,
+              period: PERIOD_FULL_LABELS[period.code as PeriodCode],
+            }),
             businessDate: businessDateIso,
-            scannedAt: effectiveAt,
+            scannedAt: effectiveAt.toISOString(),
             periodCode: period.code,
-            periodId: period.id,
-            userId: user.id,
             userName,
             employeeNo: user.employeeNo,
-            cardId: card.id,
-            reason: 'Зэрэгцээ уншилт — unique index',
+            cardUid,
           };
-        } else {
-          throw error;
+        } catch (error) {
+          if (!isUniqueViolation(error)) throw error;
+          // Зэрэгцээ ижил idempotency key ирсэн бол өмнөх хариуг буцаана
+          if (input.idempotencyKey) {
+            const existing = await findExistingByKey(input.idempotencyKey);
+            if (existing) return toResult(existing);
+          }
+          outcome = { ...base, decision: 'ALREADY_SCANNED' };
+          outcomeReason = 'Зэрэгцээ уншилт — unique index';
         }
       }
     }
   }
 
-  const finalOutcome = outcome;
   try {
-    const created = await prisma.scanEvent.create({
-      data: {
-        idempotencyKey: input.idempotencyKey ?? null,
-        deviceId: context.deviceId ?? null,
+    await execute(
+      `INSERT INTO scan_events
+         (idempotency_key, device_id, card_uid, card_id, user_id, scanned_at, business_date,
+          period_id, decision, reason, clock_skew_ms, raw_payload)
+       VALUES ($1, $2::uuid, $3, $4::uuid, $5::uuid, $6, $7::date, $8::uuid, $9, $10, $11, $12::jsonb)`,
+      [
+        input.idempotencyKey ?? null,
+        context.deviceId ?? null,
         cardUid,
-        cardId: finalOutcome.cardId,
-        userId: finalOutcome.userId,
-        scannedAt: finalOutcome.scannedAt,
-        businessDate: new Date(`${finalOutcome.businessDate}T00:00:00.000Z`),
-        periodId: finalOutcome.periodId,
-        decision: finalOutcome.decision,
-        reason: finalOutcome.reason,
+        outcomeCardId,
+        outcomeUserId,
+        outcome.scannedAt,
+        outcome.businessDate,
+        period?.id ?? null,
+        outcome.decision,
+        outcomeReason,
         clockSkewMs,
-        rawPayload: {
-          source: input.source,
-          reportedAt: reportedAt.toISOString(),
-          ...(context.allowBackdated ? { backfill: true } : {}),
-        },
-      },
-      include: { period: true, user: true },
-    });
-    return toResult(created, finalOutcome.periodCode);
+        rawPayload,
+      ],
+    );
   } catch (error) {
     // Ижил idempotency key зэрэг ирсэн бол өмнөх хариуг буцаана
-    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002' && input.idempotencyKey) {
-      const existing = await prisma.scanEvent.findUniqueOrThrow({
-        where: { idempotencyKey: input.idempotencyKey },
-        include: { period: true, user: true },
-      });
-      return toResult(existing, existing.period?.code ?? null);
+    if (isUniqueViolation(error) && input.idempotencyKey) {
+      const existing = await findExistingByKey(input.idempotencyKey);
+      if (existing) return toResult(existing);
     }
     throw error;
   }
-}
 
-interface ScanLike {
-  decision: string;
-  businessDate: Date;
-  scannedAt: Date;
-  cardUid: string;
-  user?: { firstName: string; lastName: string; employeeNo: string } | null;
-}
-
-function toResult(scan: ScanLike, periodCode: PeriodCode | null): ScanResult {
-  return {
-    decision: scan.decision as ScanResult['decision'],
-    message: messageFor(scan.decision as ScanResult['decision'], {
-      name: scan.user ? `${scan.user.lastName} ${scan.user.firstName}` : undefined,
-      period: periodCode ? PERIOD_FULL_LABELS[periodCode] : undefined,
-    }),
-    businessDate: scan.businessDate.toISOString().slice(0, 10),
-    scannedAt: scan.scannedAt.toISOString(),
-    periodCode,
-    userName: scan.user ? `${scan.user.lastName} ${scan.user.firstName}` : null,
-    employeeNo: scan.user?.employeeNo ?? null,
-    cardUid: scan.cardUid,
-  };
+  return toResult(outcome);
 }

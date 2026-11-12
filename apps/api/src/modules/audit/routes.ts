@@ -1,7 +1,8 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { PERMISSIONS } from '@shared/permissions';
-import { prisma } from '../../db/prisma';
+import { one, query } from '../../db/pool';
+import { limitOffset, param } from '../../lib/sql';
 import { parseQuery } from '../../lib/validate';
 import { authenticate } from '../../middleware/auth';
 import { requirePermission } from '../../middleware/rbac';
@@ -15,37 +16,56 @@ const querySchema = z.object({
   entity: z.string().trim().max(40).optional(),
 });
 
-router.get('/', requirePermission(PERMISSIONS.AUDIT_READ), async (req, res) => {
-  const query = parseQuery(querySchema, req);
-  const where = query.entity ? { entity: query.entity } : {};
+interface AuditRow {
+  id: string;
+  action: string;
+  entity: string;
+  entityId: string | null;
+  actorName: string | null;
+  actorEmail: string | null;
+  before: unknown;
+  after: unknown;
+  ip: string | null;
+  createdAt: Date;
+}
 
-  const [total, logs] = await Promise.all([
-    prisma.auditLog.count({ where }),
-    prisma.auditLog.findMany({
-      where,
-      include: { actor: { select: { firstName: true, lastName: true, email: true } } },
-      orderBy: { createdAt: 'desc' },
-      skip: (query.page - 1) * query.pageSize,
-      take: query.pageSize,
-    }),
+router.get('/', requirePermission(PERMISSIONS.AUDIT_READ), async (req, res) => {
+  const input = parseQuery(querySchema, req);
+  const params: unknown[] = [];
+  const whereSql = input.entity ? `WHERE a.entity = ${param(params, input.entity)}` : '';
+
+  const [totalRow, logs] = await Promise.all([
+    one<{ total: number }>(`SELECT COUNT(*)::int AS total FROM audit_logs a ${whereSql}`, params),
+    query<AuditRow>(
+      `SELECT a.id::text AS id, a.action, a.entity, a.entity_id AS "entityId",
+              CASE WHEN u.id IS NULL THEN NULL ELSE u.last_name || ' ' || u.first_name END AS "actorName",
+              u.email AS "actorEmail",
+              a.before, a.after, a.ip, a.created_at AS "createdAt"
+         FROM audit_logs a
+         LEFT JOIN users u ON u.id = a.actor_id
+         ${whereSql}
+         ORDER BY a.created_at DESC
+         ${limitOffset(input.page, input.pageSize)}`,
+      params,
+    ),
   ]);
 
   res.json({
     items: logs.map((log) => ({
-      id: log.id.toString(),
+      id: log.id,
       action: log.action,
       entity: log.entity,
       entityId: log.entityId,
-      actorName: log.actor ? `${log.actor.lastName} ${log.actor.firstName}` : 'Систем',
-      actorEmail: log.actor?.email ?? null,
+      actorName: log.actorName ?? 'Систем',
+      actorEmail: log.actorEmail,
       before: log.before,
       after: log.after,
       ip: log.ip,
       createdAt: log.createdAt.toISOString(),
     })),
-    page: query.page,
-    pageSize: query.pageSize,
-    total,
+    page: input.page,
+    pageSize: input.pageSize,
+    total: totalRow?.total ?? 0,
   });
 });
 

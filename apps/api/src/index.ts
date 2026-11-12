@@ -2,13 +2,13 @@ import './lib/bigint';
 import { createServer } from 'node:http';
 import app from './app';
 import { env } from './config/env';
-import { prisma } from './db/prisma';
+import { closePool, query } from './db/pool';
 import { startScheduler } from './jobs/reconcile';
 
 const server = createServer(app);
 
 async function main(): Promise<void> {
-  await prisma.$connect();
+  await query('SELECT 1');
   server.listen(env.PORT, () => {
     console.log(`[api] http://localhost:${env.PORT}/api/v1  (${env.NODE_ENV})`);
   });
@@ -22,7 +22,7 @@ async function shutdown(signal: string): Promise<void> {
   shuttingDown = true;
   console.log(`[api] ${signal} — хааж байна...`);
   await new Promise<void>((resolve) => server.close(() => resolve()));
-  await prisma.$disconnect();
+  await closePool();
   process.exit(0);
 }
 
@@ -34,6 +34,6 @@ for (const signal of ['SIGINT', 'SIGTERM'] as const) {
 
 main().catch(async (error) => {
   console.error('[api] Эхлүүлэхэд алдаа:', error);
-  await prisma.$disconnect();
+  await closePool().catch(() => undefined);
   process.exit(1);
 });

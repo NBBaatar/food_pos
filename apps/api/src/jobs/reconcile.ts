@@ -1,4 +1,4 @@
-import { prisma } from '../db/prisma';
+import { execute } from '../db/pool';
 import { integrity } from '../modules/reports/service';
 
 const INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -22,11 +22,13 @@ export async function reconcileOnce(): Promise<void> {
 
   // Хугацаа дууссан/хүчингүй болсон refresh токенуудыг цэвэрлэнэ
   const cutoff = new Date(Date.now() - TOKEN_RETENTION_MS);
-  const removed = await prisma.refreshToken.deleteMany({
-    where: { OR: [{ expiresAt: { lt: cutoff } }, { revokedAt: { lt: cutoff } }] },
-  });
-  if (removed.count > 0) {
-    console.log(`[reconcile] хуучин refresh token ${removed.count} устгалаа`);
+  const removed = await execute(
+    `DELETE FROM refresh_tokens
+      WHERE (expires_at < $1 AND revoked_at IS NULL) OR revoked_at < $1`,
+    [cutoff],
+  );
+  if (removed > 0) {
+    console.log(`[reconcile] хуучин refresh token ${removed} устгалаа`);
   }
 }
 

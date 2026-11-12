@@ -2,11 +2,11 @@ import { Router } from 'express';
 import { assignCardSchema, blockCardSchema, createCardSchema } from '@shared/schemas';
 import { PERMISSIONS } from '@shared/permissions';
 import { z } from 'zod';
-import type { Prisma } from '../../generated/prisma/client';
-import { prisma } from '../../db/prisma';
+import { execute, one, query, withTransaction } from '../../db/pool';
 import { writeAudit } from '../../lib/audit';
-import { toCardListItem } from '../../lib/dto';
+import { toCardListItem, type CardRow } from '../../lib/dto';
 import { AppError } from '../../lib/errors';
+import { isUniqueViolation, limitOffset, param } from '../../lib/sql';
 import { parseBody, parseQuery, pathId } from '../../lib/validate';
 import { authenticate } from '../../middleware/auth';
 import { requirePermission } from '../../middleware/rbac';
@@ -14,12 +14,21 @@ import { requirePermission } from '../../middleware/rbac';
 const router = Router();
 router.use(authenticate);
 
-const cardInclude = {
-  assignments: {
-    where: { releasedAt: null },
-    include: { user: { select: { id: true, firstName: true, lastName: true, employeeNo: true } } },
-  },
-} satisfies Prisma.CardInclude;
+const CARD_SELECT = `
+  SELECT c.id, c.uid, c.label, c.status,
+         h.user_id AS "holderId",
+         CASE WHEN h.user_id IS NULL THEN NULL ELSE h.last_name || ' ' || h.first_name END AS "holderName",
+         h.assigned_at AS "assignedAt",
+         c.created_at AS "createdAt"
+    FROM cards c
+    LEFT JOIN LATERAL (
+      SELECT u.id AS user_id, u.first_name, u.last_name, ca.assigned_at
+        FROM card_assignments ca
+        JOIN users u ON u.id = ca.user_id
+       WHERE ca.card_id = c.id AND ca.released_at IS NULL
+       LIMIT 1
+    ) h ON true
+`;
 
 const listSchema = z.object({
   search: z.string().trim().max(80).optional(),
@@ -29,102 +38,134 @@ const listSchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(200).default(25),
 });
 
-router.get('/', requirePermission(PERMISSIONS.CARD_READ), async (req, res) => {
-  const query = parseQuery(listSchema, req);
-  const where: Prisma.CardWhereInput = {
-    ...(query.status ? { status: query.status } : {}),
-    ...(query.search
-      ? {
-          OR: [
-            { uid: { contains: query.search, mode: 'insensitive' } },
-            { label: { contains: query.search, mode: 'insensitive' } },
-            { assignments: { some: { releasedAt: null, user: { OR: [
-              { firstName: { contains: query.search, mode: 'insensitive' } },
-              { lastName: { contains: query.search, mode: 'insensitive' } },
-              { employeeNo: { contains: query.search, mode: 'insensitive' } },
-            ] } } } },
-          ],
-        }
-      : {}),
-    ...(query.assigned === 'true' ? { assignments: { some: { releasedAt: null } } } : {}),
-    ...(query.assigned === 'false' ? { assignments: { none: { releasedAt: null } } } : {}),
-  };
+async function findCardById(id: string): Promise<CardRow | null> {
+  return one<CardRow>(`${CARD_SELECT} WHERE c.id = $1::uuid`, [id]);
+}
 
-  const [total, cards] = await Promise.all([
-    prisma.card.count({ where }),
-    prisma.card.findMany({
-      where,
-      include: cardInclude,
-      orderBy: { createdAt: 'desc' },
-      skip: (query.page - 1) * query.pageSize,
-      take: query.pageSize,
-    }),
+router.get('/', requirePermission(PERMISSIONS.CARD_READ), async (req, res) => {
+  const input = parseQuery(listSchema, req);
+  const params: unknown[] = [];
+  const where: string[] = [];
+
+  if (input.status) where.push(`c.status = ${param(params, input.status)}`);
+  if (input.assigned === 'true') {
+    where.push('EXISTS (SELECT 1 FROM card_assignments ca WHERE ca.card_id = c.id AND ca.released_at IS NULL)');
+  }
+  if (input.assigned === 'false') {
+    where.push('NOT EXISTS (SELECT 1 FROM card_assignments ca WHERE ca.card_id = c.id AND ca.released_at IS NULL)');
+  }
+  if (input.search) {
+    const like = param(params, `%${input.search}%`);
+    where.push(`(c.uid ILIKE ${like} OR c.label ILIKE ${like}
+      OR EXISTS (
+        SELECT 1 FROM card_assignments ca JOIN users u ON u.id = ca.user_id
+         WHERE ca.card_id = c.id AND ca.released_at IS NULL
+           AND (u.first_name ILIKE ${like} OR u.last_name ILIKE ${like} OR u.employee_no ILIKE ${like})
+      ))`);
+  }
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+
+  const [totalRow, cards] = await Promise.all([
+    one<{ total: number }>(`SELECT COUNT(*)::int AS total FROM cards c ${whereSql}`, params),
+    query<CardRow>(
+      `${CARD_SELECT} ${whereSql} ORDER BY c.created_at DESC ${limitOffset(input.page, input.pageSize)}`,
+      params,
+    ),
   ]);
 
-  res.json({ items: cards.map(toCardListItem), page: query.page, pageSize: query.pageSize, total });
+  res.json({
+    items: cards.map(toCardListItem),
+    page: input.page,
+    pageSize: input.pageSize,
+    total: totalRow?.total ?? 0,
+  });
 });
 
 router.post('/', requirePermission(PERMISSIONS.CARD_MANAGE), async (req, res) => {
   const input = parseBody(createCardSchema, req);
   const uid = input.uid.trim().toUpperCase();
 
-  const duplicate = await prisma.card.findFirst({ where: { uid }, select: { id: true } });
-  if (duplicate) throw new AppError(409, 'Энэ UID-тай карт бүртгэгдсэн байна', 'DUPLICATE_CARD');
+  try {
+    const cardId = await withTransaction(async (client) => {
+      const created = await client.query<{ id: string }>(
+        'INSERT INTO cards (uid, label) VALUES ($1, $2) RETURNING id',
+        [uid, input.label || null],
+      );
+      const id = created.rows[0]!.id;
 
-  const card = await prisma.$transaction(async (tx) => {
-    const created = await tx.card.create({ data: { uid, label: input.label || null } });
-    if (input.userId) {
-      const user = await tx.user.findFirst({ where: { id: input.userId, deletedAt: null } });
-      if (!user) throw new AppError(404, 'Хэрэглэгч олдсонгүй', 'NO_USER');
-      await tx.cardAssignment.updateMany({
-        where: { OR: [{ cardId: created.id }, { userId: user.id }], releasedAt: null },
-        data: { releasedAt: new Date() },
-      });
-      await tx.cardAssignment.create({
-        data: { cardId: created.id, userId: user.id, assignedById: req.auth!.id },
-      });
+      if (input.userId) {
+        const user = await client.query('SELECT id FROM users WHERE id = $1::uuid AND deleted_at IS NULL', [
+          input.userId,
+        ]);
+        if (user.rowCount === 0) throw new AppError(404, 'Хэрэглэгч олдсонгүй', 'NO_USER');
+        await client.query(
+          `UPDATE card_assignments SET released_at = now()
+            WHERE released_at IS NULL AND (card_id = $1::uuid OR user_id = $2::uuid)`,
+          [id, input.userId],
+        );
+        await client.query(
+          `INSERT INTO card_assignments (card_id, user_id, assigned_by_id)
+           VALUES ($1::uuid, $2::uuid, $3::uuid)`,
+          [id, input.userId, req.auth!.id],
+        );
+      }
+      return id;
+    });
+
+    const card = await findCardById(cardId);
+    if (!card) throw new AppError(500, 'Карт үүссэнгүй', 'CREATE_FAILED');
+
+    await writeAudit({
+      actorId: req.auth!.id,
+      action: 'card.create',
+      entity: 'card',
+      entityId: card.id,
+      after: { uid: card.uid },
+      req,
+    });
+
+    res.status(201).json({ card: toCardListItem(card) });
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      throw new AppError(409, 'Энэ UID-тай карт бүртгэгдсэн байна', 'DUPLICATE_CARD');
     }
-    return tx.card.findUniqueOrThrow({ where: { id: created.id }, include: cardInclude });
-  });
-
-  await writeAudit({
-    actorId: req.auth!.id,
-    action: 'card.create',
-    entity: 'card',
-    entityId: card.id,
-    after: { uid: card.uid },
-    req,
-  });
-
-  res.status(201).json({ card: toCardListItem(card) });
+    throw error;
+  }
 });
 
 router.post('/:id/assign', requirePermission(PERMISSIONS.CARD_MANAGE), async (req, res) => {
   const { userId } = parseBody(assignCardSchema, req);
-  const card = await prisma.card.findUnique({ where: { id: pathId(req.params.id) } });
+  const card = await one<{ id: string; status: string }>('SELECT id, status FROM cards WHERE id = $1::uuid', [
+    pathId(req.params.id),
+  ]);
   if (!card) throw new AppError(404, 'Карт олдсонгүй', 'NOT_FOUND');
   if (card.status !== 'ACTIVE') throw new AppError(400, 'Карт идэвхгүй байна', 'CARD_BLOCKED');
 
-  const user = await prisma.user.findFirst({ where: { id: userId, deletedAt: null } });
+  const user = await one('SELECT id FROM users WHERE id = $1::uuid AND deleted_at IS NULL', [userId]);
   if (!user) throw new AppError(404, 'Хэрэглэгч олдсонгүй', 'NO_USER');
 
-  const updated = await prisma.$transaction(async (tx) => {
-    await tx.cardAssignment.updateMany({
-      where: { OR: [{ cardId: card.id }, { userId: user.id }], releasedAt: null },
-      data: { releasedAt: new Date() },
-    });
-    await tx.cardAssignment.create({
-      data: { cardId: card.id, userId: user.id, assignedById: req.auth!.id },
-    });
-    return tx.card.findUniqueOrThrow({ where: { id: card.id }, include: cardInclude });
+  await withTransaction(async (client) => {
+    await client.query(
+      `UPDATE card_assignments SET released_at = now()
+        WHERE released_at IS NULL AND (card_id = $1::uuid OR user_id = $2::uuid)`,
+      [card.id, userId],
+    );
+    await client.query(
+      `INSERT INTO card_assignments (card_id, user_id, assigned_by_id)
+       VALUES ($1::uuid, $2::uuid, $3::uuid)`,
+      [card.id, userId, req.auth!.id],
+    );
   });
+
+  const updated = await findCardById(card.id);
+  if (!updated) throw new AppError(404, 'Карт олдсонгүй', 'NOT_FOUND');
 
   await writeAudit({
     actorId: req.auth!.id,
     action: 'card.assign',
     entity: 'card',
     entityId: card.id,
-    after: { userId: user.id },
+    after: { userId },
     req,
   });
 
@@ -132,34 +173,40 @@ router.post('/:id/assign', requirePermission(PERMISSIONS.CARD_MANAGE), async (re
 });
 
 router.post('/:id/release', requirePermission(PERMISSIONS.CARD_MANAGE), async (req, res) => {
-  const card = await prisma.card.findUnique({ where: { id: pathId(req.params.id) } });
+  const card = await one('SELECT id FROM cards WHERE id = $1::uuid', [pathId(req.params.id)]);
   if (!card) throw new AppError(404, 'Карт олдсонгүй', 'NOT_FOUND');
 
-  await prisma.cardAssignment.updateMany({
-    where: { cardId: card.id, releasedAt: null },
-    data: { releasedAt: new Date() },
+  await execute('UPDATE card_assignments SET released_at = now() WHERE card_id = $1::uuid AND released_at IS NULL', [
+    pathId(req.params.id),
+  ]);
+  await writeAudit({
+    actorId: req.auth!.id,
+    action: 'card.release',
+    entity: 'card',
+    entityId: pathId(req.params.id),
+    req,
   });
-  await writeAudit({ actorId: req.auth!.id, action: 'card.release', entity: 'card', entityId: card.id, req });
 
   res.json({ ok: true });
 });
 
 router.post('/:id/block', requirePermission(PERMISSIONS.CARD_BLOCK), async (req, res) => {
   const input = parseBody(blockCardSchema, req);
-  const card = await prisma.card.findUnique({ where: { id: pathId(req.params.id) } });
+  const card = await one<{ id: string; status: string }>('SELECT id, status FROM cards WHERE id = $1::uuid', [
+    pathId(req.params.id),
+  ]);
   if (!card) throw new AppError(404, 'Карт олдсонгүй', 'NOT_FOUND');
   if (card.status === 'BLOCKED') throw new AppError(400, 'Карт аль хэдийн идэвхгүй байна', 'ALREADY_BLOCKED');
 
-  const updated = await prisma.card.update({
-    where: { id: card.id },
-    data: {
-      status: 'BLOCKED',
-      blockedAt: new Date(),
-      blockedById: req.auth!.id,
-      blockReason: input.reason || null,
-    },
-    include: cardInclude,
-  });
+  await execute(
+    `UPDATE cards
+        SET status = 'BLOCKED', blocked_at = now(), blocked_by_id = $2::uuid, block_reason = $3, updated_at = now()
+      WHERE id = $1::uuid`,
+    [card.id, req.auth!.id, input.reason || null],
+  );
+
+  const updated = await findCardById(card.id);
+  if (!updated) throw new AppError(404, 'Карт олдсонгүй', 'NOT_FOUND');
 
   await writeAudit({
     actorId: req.auth!.id,
@@ -175,15 +222,21 @@ router.post('/:id/block', requirePermission(PERMISSIONS.CARD_BLOCK), async (req,
 });
 
 router.post('/:id/unblock', requirePermission(PERMISSIONS.CARD_MANAGE), async (req, res) => {
-  const card = await prisma.card.findUnique({ where: { id: pathId(req.params.id) } });
+  const card = await one<{ id: string; status: string }>('SELECT id, status FROM cards WHERE id = $1::uuid', [
+    pathId(req.params.id),
+  ]);
   if (!card) throw new AppError(404, 'Карт олдсонгүй', 'NOT_FOUND');
   if (card.status === 'ACTIVE') throw new AppError(400, 'Карт идэвхтэй байна', 'ALREADY_ACTIVE');
 
-  const updated = await prisma.card.update({
-    where: { id: card.id },
-    data: { status: 'ACTIVE', blockedAt: null, blockedById: null, blockReason: null },
-    include: cardInclude,
-  });
+  await execute(
+    `UPDATE cards
+        SET status = 'ACTIVE', blocked_at = NULL, blocked_by_id = NULL, block_reason = NULL, updated_at = now()
+      WHERE id = $1::uuid`,
+    [card.id],
+  );
+
+  const updated = await findCardById(card.id);
+  if (!updated) throw new AppError(404, 'Карт олдсонгүй', 'NOT_FOUND');
 
   await writeAudit({
     actorId: req.auth!.id,
@@ -199,40 +252,67 @@ router.post('/:id/unblock', requirePermission(PERMISSIONS.CARD_MANAGE), async (r
 });
 
 router.get('/:id/history', requirePermission(PERMISSIONS.CARD_READ), async (req, res) => {
-  const card = await prisma.card.findUnique({ where: { id: pathId(req.params.id) } });
+  const card = await one<{ id: string; uid: string; status: string; label: string | null }>(
+    'SELECT id, uid, status, label FROM cards WHERE id = $1::uuid',
+    [pathId(req.params.id)],
+  );
   if (!card) throw new AppError(404, 'Карт олдсонгүй', 'NOT_FOUND');
 
   const [assignments, scans] = await Promise.all([
-    prisma.cardAssignment.findMany({
-      where: { cardId: card.id },
-      include: { user: { select: { firstName: true, lastName: true, employeeNo: true } } },
-      orderBy: { assignedAt: 'desc' },
-      take: 20,
-    }),
-    prisma.scanEvent.findMany({
-      where: { cardId: card.id },
-      orderBy: { receivedAt: 'desc' },
-      take: 20,
-      include: { period: true, user: { select: { firstName: true, lastName: true } } },
-    }),
+    query<{
+      id: string;
+      userName: string;
+      employeeNo: string;
+      assignedAt: Date;
+      releasedAt: Date | null;
+    }>(
+      `SELECT ca.id, u.last_name || ' ' || u.first_name AS "userName", u.employee_no AS "employeeNo",
+              ca.assigned_at AS "assignedAt", ca.released_at AS "releasedAt"
+         FROM card_assignments ca
+         JOIN users u ON u.id = ca.user_id
+        WHERE ca.card_id = $1::uuid
+        ORDER BY ca.assigned_at DESC
+        LIMIT 20`,
+      [card.id],
+    ),
+    query<{
+      id: string;
+      decision: string;
+      periodCode: string | null;
+      businessDate: string;
+      scannedAt: Date;
+      userName: string | null;
+    }>(
+      `SELECT s.id::text AS id, s.decision, p.code AS "periodCode",
+              to_char(s.business_date, 'YYYY-MM-DD') AS "businessDate",
+              s.scanned_at AS "scannedAt",
+              CASE WHEN u.id IS NULL THEN NULL ELSE u.last_name || ' ' || u.first_name END AS "userName"
+         FROM scan_events s
+         LEFT JOIN meal_periods p ON p.id = s.period_id
+         LEFT JOIN users u ON u.id = s.user_id
+        WHERE s.card_id = $1::uuid
+        ORDER BY s.received_at DESC
+        LIMIT 20`,
+      [card.id],
+    ),
   ]);
 
   res.json({
     card: { id: card.id, uid: card.uid, status: card.status, label: card.label },
     assignments: assignments.map((a) => ({
       id: a.id,
-      userName: `${a.user.lastName} ${a.user.firstName}`,
-      employeeNo: a.user.employeeNo,
+      userName: a.userName,
+      employeeNo: a.employeeNo,
       assignedAt: a.assignedAt.toISOString(),
       releasedAt: a.releasedAt ? a.releasedAt.toISOString() : null,
     })),
     scans: scans.map((s) => ({
-      id: s.id.toString(),
+      id: s.id,
       decision: s.decision,
-      periodCode: s.period?.code ?? null,
-      businessDate: s.businessDate.toISOString().slice(0, 10),
+      periodCode: s.periodCode,
+      businessDate: s.businessDate,
       scannedAt: s.scannedAt.toISOString(),
-      userName: s.user ? `${s.user.lastName} ${s.user.firstName}` : null,
+      userName: s.userName,
     })),
   });
 });

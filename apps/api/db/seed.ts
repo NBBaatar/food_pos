@@ -1,6 +1,6 @@
 import { DEFAULT_PERIODS } from '@shared/meal';
 import { env } from '../src/config/env';
-import { prisma } from '../src/db/prisma';
+import { closePool, execute, one, query } from '../src/db/pool';
 import { hashPassword } from '../src/lib/password';
 import { addDaysIso, businessDateFor } from '../src/lib/time';
 import { hashToken } from '../src/lib/tokens';
@@ -99,37 +99,39 @@ function randomTimeInWindow(businessIso: string, [from, to]: [number, number]): 
 
 async function main(): Promise<void> {
   console.log('→ Гүйлгээний өгөгдлийг цэвэрлэж байна...');
-  await prisma.$executeRawUnsafe(
+  await execute(
     'TRUNCATE TABLE meal_records, scan_events, audit_logs, refresh_tokens, card_assignments RESTART IDENTITY CASCADE',
   );
 
   console.log('→ Хэлтэс...');
   const departments = await Promise.all(
     DEPARTMENTS.map((d) =>
-      prisma.department.upsert({
-        where: { name: d.name },
-        update: { code: d.code },
-        create: { name: d.name, code: d.code },
-      }),
+      one<{ id: string; name: string }>(
+        `INSERT INTO departments (name, code) VALUES ($1, $2)
+         ON CONFLICT (name) DO UPDATE SET code = EXCLUDED.code
+         RETURNING id, name`,
+        [d.name, d.code],
+      ),
     ),
   );
+  const departmentIds = departments.map((d) => d!.id);
+  const departmentByName = new Map(departments.map((d) => [d!.name, d!.id]));
 
   console.log('→ Хоолны цонх...');
   for (const period of DEFAULT_PERIODS) {
-    await prisma.mealPeriod.upsert({
-      where: { code: period.code },
-      update: {
-        name: period.name,
-        startTime: period.startTime,
-        endTime: period.endTime,
-        crossesMidnight: period.crossesMidnight,
-        sortOrder: period.sortOrder,
-        isActive: true,
-      },
-      create: { ...period },
-    });
+    await execute(
+      `INSERT INTO meal_periods (code, name, start_time, end_time, crosses_midnight, sort_order, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6, true)
+       ON CONFLICT (code) DO UPDATE
+         SET name = EXCLUDED.name, start_time = EXCLUDED.start_time, end_time = EXCLUDED.end_time,
+             crosses_midnight = EXCLUDED.crosses_midnight, sort_order = EXCLUDED.sort_order, is_active = true`,
+      [period.code, period.name, period.startTime, period.endTime, period.crossesMidnight, period.sortOrder],
+    );
   }
-  const periods = await prisma.mealPeriod.findMany({ orderBy: { sortOrder: 'asc' } });
+  const periods = await query<{ id: string; code: string; startTime: string; endTime: string }>(
+    `SELECT id, code, start_time AS "startTime", end_time AS "endTime"
+       FROM meal_periods ORDER BY sort_order ASC`,
+  );
   const periodsByCode = new Map(periods.map((p) => [p.code, p]));
 
   console.log('→ Хэрэглэгчид...');
@@ -139,53 +141,33 @@ async function main(): Promise<void> {
     hashPassword(STAFF_PASSWORD),
   ]);
 
-  const admin = await prisma.user.upsert({
-    where: { email: 'admin@foodpos.mn' },
-    update: { passwordHash: adminHash, role: 'ADMIN', status: 'ACTIVE', deletedAt: null },
-    create: {
-      employeeNo: 'A-0001',
-      firstName: 'Системийн',
-      lastName: 'Админ',
-      email: 'admin@foodpos.mn',
-      phone: '+976 9911 0001',
-      passwordHash: adminHash,
-      role: 'ADMIN',
-      departmentId: departments[0]!.id,
-      mustChangePassword: false,
-    },
-  });
+  const admin = await one<{ id: string }>(
+    `INSERT INTO users (employee_no, first_name, last_name, email, phone, password_hash, role, status,
+                        department_id, must_change_password)
+     VALUES ('A-0001', 'Системийн', 'Админ', 'admin@foodpos.mn', '+976 9911 0001', $1, 'ADMIN', 'ACTIVE', $2::uuid, false)
+     ON CONFLICT (email) DO UPDATE
+       SET password_hash = EXCLUDED.password_hash, role = 'ADMIN', status = 'ACTIVE', deleted_at = NULL
+     RETURNING id`,
+    [adminHash, departmentIds[0]],
+  );
 
-  await prisma.user.upsert({
-    where: { email: 'manager@foodpos.mn' },
-    update: { passwordHash: managerHash, role: 'MANAGER', status: 'ACTIVE', deletedAt: null },
-    create: {
-      employeeNo: 'M-0001',
-      firstName: 'Тайлангийн',
-      lastName: 'Менежер',
-      email: 'manager@foodpos.mn',
-      phone: '+976 9911 0002',
-      passwordHash: managerHash,
-      role: 'MANAGER',
-      departmentId: departments[0]!.id,
-      mustChangePassword: false,
-    },
-  });
+  await execute(
+    `INSERT INTO users (employee_no, first_name, last_name, email, phone, password_hash, role, status,
+                        department_id, must_change_password)
+     VALUES ('M-0001', 'Тайлангийн', 'Менежер', 'manager@foodpos.mn', '+976 9911 0002', $1, 'MANAGER', 'ACTIVE', $2::uuid, false)
+     ON CONFLICT (email) DO UPDATE
+       SET password_hash = EXCLUDED.password_hash, role = 'MANAGER', status = 'ACTIVE', deleted_at = NULL`,
+    [managerHash, departmentIds[0]],
+  );
 
-  await prisma.user.upsert({
-    where: { email: 'user@foodpos.mn' },
-    update: { passwordHash: staffHash, role: 'USER', status: 'ACTIVE', deletedAt: null },
-    create: {
-      employeeNo: 'U-0001',
-      firstName: 'Бүртгэлийн',
-      lastName: 'Ажилтан',
-      email: 'user@foodpos.mn',
-      phone: '+976 9911 0003',
-      passwordHash: staffHash,
-      role: 'USER',
-      departmentId: departments[2]!.id,
-      mustChangePassword: false,
-    },
-  });
+  await execute(
+    `INSERT INTO users (employee_no, first_name, last_name, email, phone, password_hash, role, status,
+                        department_id, must_change_password)
+     VALUES ('U-0001', 'Бүртгэлийн', 'Ажилтан', 'user@foodpos.mn', '+976 9911 0003', $1, 'USER', 'ACTIVE', $2::uuid, false)
+     ON CONFLICT (email) DO UPDATE
+       SET password_hash = EXCLUDED.password_hash, role = 'USER', status = 'ACTIVE', deleted_at = NULL`,
+    [staffHash, departmentByName.get('Борлуулалт')!],
+  );
 
   const staff: { id: string; cardUid: string; active: boolean }[] = [];
 
@@ -194,66 +176,65 @@ async function main(): Promise<void> {
     const firstName = FIRST_NAMES[(i * 7 + 3) % FIRST_NAMES.length]!;
     const employeeNo = `E-${String(1001 + i)}`;
     const email = `staff${i + 1}@foodpos.mn`;
-    const department = departments[i % departments.length]!;
+    const departmentId = departmentIds[i % departmentIds.length]!;
     const inactive = i === 5 || i === 17;
 
-    const user = await prisma.user.upsert({
-      where: { employeeNo },
-      update: {
-        firstName,
-        lastName,
-        email,
-        departmentId: department.id,
-        passwordHash: staffHash,
-        status: inactive ? 'INACTIVE' : 'ACTIVE',
-        deletedAt: null,
-      },
-      create: {
+    const user = await one<{ id: string }>(
+      `INSERT INTO users (employee_no, first_name, last_name, email, phone, password_hash, role, status,
+                          department_id, must_change_password)
+       VALUES ($1, $2, $3, $4, $5, $6, 'USER', $7, $8::uuid, false)
+       ON CONFLICT (employee_no) DO UPDATE
+         SET first_name = EXCLUDED.first_name, last_name = EXCLUDED.last_name, email = EXCLUDED.email,
+             department_id = EXCLUDED.department_id, password_hash = EXCLUDED.password_hash,
+             status = EXCLUDED.status, deleted_at = NULL
+       RETURNING id`,
+      [
         employeeNo,
         firstName,
         lastName,
         email,
-        phone: `+976 ${8800 + i} ${1000 + i}`,
-        passwordHash: staffHash,
-        role: 'USER',
-        status: inactive ? 'INACTIVE' : 'ACTIVE',
-        departmentId: department.id,
-        mustChangePassword: false,
-      },
-    });
+        `+976 ${8800 + i} ${1000 + i}`,
+        staffHash,
+        inactive ? 'INACTIVE' : 'ACTIVE',
+        departmentId,
+      ],
+    );
 
     const uid = `04${(0xa1b2c300 + i * 17).toString(16).toUpperCase().padStart(8, '0')}`;
-    const card = await prisma.card.upsert({
-      where: { uid },
-      update: { label: `${lastName} ${firstName}`, status: 'ACTIVE' },
-      create: { uid, label: `${lastName} ${firstName}`, status: 'ACTIVE' },
-    });
+    const card = await one<{ id: string }>(
+      `INSERT INTO cards (uid, label, status) VALUES ($1, $2, 'ACTIVE')
+       ON CONFLICT (uid) DO UPDATE SET label = EXCLUDED.label, status = 'ACTIVE'
+       RETURNING id`,
+      [uid, `${lastName} ${firstName}`],
+    );
 
-    await prisma.cardAssignment.create({
-      data: { cardId: card.id, userId: user.id, assignedById: admin.id },
-    });
+    await execute(
+      `INSERT INTO card_assignments (card_id, user_id, assigned_by_id)
+       VALUES ($1::uuid, $2::uuid, $3::uuid)`,
+      [card!.id, user!.id, admin!.id],
+    );
 
-    staff.push({ id: user.id, cardUid: uid, active: !inactive });
+    staff.push({ id: user!.id, cardUid: uid, active: !inactive });
   }
 
   // Нэг карт блоклогдсон, нэг карт хэн ч эзэмшээгүй (тестэд хэрэгтэй)
   const blockedUser = staff[3]!;
-  await prisma.card.update({
-    where: { uid: blockedUser.cardUid },
-    data: { status: 'BLOCKED', blockedAt: new Date(), blockedById: admin.id, blockReason: 'Тест: алдагдсан карт' },
-  });
+  await execute(
+    `UPDATE cards
+        SET status = 'BLOCKED', blocked_at = now(), blocked_by_id = $2::uuid, block_reason = $3, updated_at = now()
+      WHERE uid = $1`,
+    [blockedUser.cardUid, admin!.id, 'Тест: алдагдсан карт'],
+  );
 
   console.log('→ Төхөөрөмж...');
-  const device = await prisma.device.upsert({
-    where: { code: 'KIOSK-01' },
-    update: { name: 'Үндсэн хоолны терминал', status: 'ACTIVE', apiKeyHash: hashToken(env.SEED_DEVICE_KEY) },
-    create: {
-      code: 'KIOSK-01',
-      name: 'Үндсэн хоолны терминал',
-      location: '1 давхар, хоолны танхим',
-      apiKeyHash: hashToken(env.SEED_DEVICE_KEY),
-    },
-  });
+  const device = await one<{ id: string; code: string }>(
+    `INSERT INTO devices (code, name, location, api_key_hash)
+     VALUES ('KIOSK-01', 'Үндсэн хоолны терминал', '1 давхар, хоолны танхим', $1)
+     ON CONFLICT (code) DO UPDATE
+       SET name = EXCLUDED.name, status = 'ACTIVE', api_key_hash = EXCLUDED.api_key_hash
+     RETURNING id, code`,
+    [hashToken(env.SEED_DEVICE_KEY)],
+  );
 
   console.log('→ Тохиргоо...');
   for (const [key, value] of Object.entries({
@@ -262,7 +243,11 @@ async function main(): Promise<void> {
     dayStartHour: env.DAY_START_HOUR,
     currency: 'MNT',
   })) {
-    await prisma.setting.upsert({ where: { key }, update: { value }, create: { key, value } });
+    await execute(
+      `INSERT INTO settings (key, value) VALUES ($1, $2::jsonb)
+       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`,
+      [key, JSON.stringify(value)],
+    );
   }
 
   console.log(`→ ${HISTORY_DAYS} хоногийн уншилт үүсгэж байна...`);
@@ -289,9 +274,9 @@ async function main(): Promise<void> {
             cardUid: person.cardUid,
             scannedAt: scannedAt.toISOString(),
             source: 'KIOSK',
-            deviceCode: device.code,
+            deviceCode: device!.code,
           },
-          { deviceId: device.id, deviceCode: device.code, allowBackdated: true },
+          { deviceId: device!.id, deviceCode: device!.code, allowBackdated: true },
         );
         if (result.decision === 'ACCEPTED') accepted += 1;
       }
@@ -303,7 +288,6 @@ async function main(): Promise<void> {
   }
 
   console.log('→ Давхардсан оролдлого, танигдахгүй карт, цаснаас гадуур уншилт...');
-  const todayIso = today;
   const samplePerson = activeStaff[0]!;
   const lunch = periodsByCode.get('LUNCH')!;
   for (const [hour, minute] of [
@@ -311,41 +295,40 @@ async function main(): Promise<void> {
     [12, 10],
   ] as const) {
     await recordScan(
-      { cardUid: samplePerson.cardUid, scannedAt: ubTime(todayIso, hour, minute).toISOString(), source: 'KIOSK' },
-      { deviceId: device.id, deviceCode: device.code, allowBackdated: true },
+      { cardUid: samplePerson.cardUid, scannedAt: ubTime(today, hour, minute).toISOString(), source: 'KIOSK' },
+      { deviceId: device!.id, deviceCode: device!.code, allowBackdated: true },
     );
   }
   await recordScan(
-    { cardUid: 'DEADBEEF99', scannedAt: ubTime(todayIso, 12, 30).toISOString(), source: 'KIOSK' },
-    { deviceId: device.id, deviceCode: device.code, allowBackdated: true },
+    { cardUid: 'DEADBEEF99', scannedAt: ubTime(today, 12, 30).toISOString(), source: 'KIOSK' },
+    { deviceId: device!.id, deviceCode: device!.code, allowBackdated: true },
   );
   await recordScan(
-    { cardUid: blockedUser.cardUid, scannedAt: ubTime(todayIso, 12, 35).toISOString(), source: 'KIOSK' },
-    { deviceId: device.id, deviceCode: device.code, allowBackdated: true },
+    { cardUid: blockedUser.cardUid, scannedAt: ubTime(today, 12, 35).toISOString(), source: 'KIOSK' },
+    { deviceId: device!.id, deviceCode: device!.code, allowBackdated: true },
   );
   await recordScan(
-    { cardUid: samplePerson.cardUid, scannedAt: ubTime(todayIso, 15, 30).toISOString(), source: 'KIOSK' },
-    { deviceId: device.id, deviceCode: device.code, allowBackdated: true },
+    { cardUid: samplePerson.cardUid, scannedAt: ubTime(today, 15, 30).toISOString(), source: 'KIOSK' },
+    { deviceId: device!.id, deviceCode: device!.code, allowBackdated: true },
   );
 
   const [mealCount, scanCount, userCount, cardCount] = await Promise.all([
-    prisma.mealRecord.count(),
-    prisma.scanEvent.count(),
-    prisma.user.count(),
-    prisma.card.count(),
+    one<{ n: number }>('SELECT COUNT(*)::int AS n FROM meal_records'),
+    one<{ n: number }>('SELECT COUNT(*)::int AS n FROM scan_events'),
+    one<{ n: number }>('SELECT COUNT(*)::int AS n FROM users'),
+    one<{ n: number }>('SELECT COUNT(*)::int AS n FROM cards'),
   ]);
 
   console.log('\n✓ Seed дууслаа');
-  console.log(`  хэрэглэгч: ${userCount}, карт: ${cardCount}`);
-  console.log(`  уншилт: ${scanCount} (хүлээн авсан ${accepted}/${attempted} оролдлого)`);
-  console.log(`  хоолны бүртгэл: ${mealCount}`);
+  console.log(`  хэрэглэгч: ${userCount?.n}, карт: ${cardCount?.n}`);
+  console.log(`  уншилт: ${scanCount?.n} (хүлээн авсан ${accepted}/${attempted} оролдлого)`);
+  console.log(`  хоолны бүртгэл: ${mealCount?.n}`);
   console.log(`  өнөөдрийн бизнес өдөр: ${today}, өдрийн LUNCH цонх: ${lunch.startTime}-${lunch.endTime}`);
   console.log('\n  Нэвтрэх:');
   console.log(`   ADMIN   admin@foodpos.mn / ${ADMIN_PASSWORD}`);
   console.log(`   MANAGER manager@foodpos.mn / ${MANAGER_PASSWORD}`);
   console.log(`   USER    user@foodpos.mn / ${STAFF_PASSWORD}`);
-  console.log(`  Төхөөрөмж: ${device.code}, x-device-key: ${env.SEED_DEVICE_KEY}`);
-
+  console.log(`  Төхөөрөмж: ${device!.code}, x-device-key: ${env.SEED_DEVICE_KEY}`);
 }
 
 main()
@@ -354,5 +337,6 @@ main()
     process.exitCode = 1;
   })
   .finally(async () => {
-    await prisma.$disconnect();
+    await closePool();
   });
+

@@ -1,6 +1,6 @@
 # Хоолны RFID бүртгэл, тайлангийн систем — Төлөвлөгөө ба төслийн бүтэц
 
-Стек: **Node.js + Express + TypeScript**, **React (Vite) + shadcn/ui + Tailwind**, **PostgreSQL 17**, Prisma (ORM), Redis (сонголтоор: rate-limit / кэш).
+Стек: **Node.js + Express + TypeScript**, **React (Vite) + shadcn/ui + Tailwind**, **PostgreSQL 17**, `pg` (node-postgres, ORM-гүй шууд SQL), Redis (сонголтоор: rate-limit / кэш).
 
 ---
 
@@ -199,15 +199,15 @@ food_pos/
 ├─ PLAN.md  README.md
 ├─ apps/
 │  ├─ api/
-│  │  ├─ prisma/
-│  │  │  ├─ schema.prisma
+│  │  ├─ db/
+│  │  │  ├─ schema.sql
 │  │  │  ├─ migrations/
 │  │  │  └─ seed.ts               # admin, period, demo users/cards
 │  │  ├─ src/
 │  │  │  ├─ index.ts              # bootstrap, graceful shutdown
 │  │  │  ├─ app.ts                # express app, middleware, routes
 │  │  │  ├─ config/env.ts         # zod-аар шалгасан env
-│  │  │  ├─ db/prisma.ts
+│  │  │  ├─ db/pool.ts
 │  │  │  ├─ modules/
 │  │  │  │  ├─ auth/       {routes,controller,service,schemas,password}.ts
 │  │  │  │  ├─ users/      {routes,controller,service,schemas}.ts
@@ -279,7 +279,7 @@ food_pos/
 
 | Үе | Агуулга | Дуусах шалгуур (acceptance) |
 |---|---|---|
-| **P0. Суурь** (2–3 хоног) | monorepo, TS, ESLint/Prettier, docker-compose, Prisma init, `.env`, health endpoint, shadcn суулгах | `docker compose up` → API `/health` 200, web ачаална |
+| **P0. Суурь** (2–3 хоног) | monorepo, TS, ESLint/Prettier, docker-compose, SQL schema, `.env`, health endpoint, shadcn суулгах | `docker compose up` → API `/health` 200, web ачаална |
 | **P1. Auth + RBAC** (3–4 хоног) | users/permissions таблиц, login/refresh/logout, argon2, requirePermission, audit log, seed admin | 3 түвшний хэрэглэгчээр нэвтэрч, зөвхөн зөв цэс/endpoint харагдана (rbac тест) |
 | **P2. Хэрэглэгч ба карт** (4–5 хоног) | user CRUD (+эрхийн хязгаар), card CRUD, assign/release, block/unblock, түүх | "USER" түвшин зөвхөн USER нэмж, карт идэвхгүй болгож чадна; өөр үйлдэл 403 |
 | **P3. Уншилт ба хоолны логик** (5–7 хоног) | `businessDate.ts`, period тодорхойлогч, decision engine, `POST /scans`, unique constraint, idempotency, kiosk хуудас, эхний HID уншигчтай туршилт | Ижил картыг 2 удаа уншуулахад 1 meal_record; өөр өдөр/өөр хоолд шинээр бүртгэгдэнэ; 00:30-ийн уншилт өмнөх өдөрт орно |

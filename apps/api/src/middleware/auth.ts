@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from 'express';
 import { permissionsForRole, type Permission, type Role } from '@shared/permissions';
-import { prisma } from '../db/prisma';
+import { one } from '../db/pool';
 import { AppError } from '../lib/errors';
 import { verifyAccessToken } from '../lib/tokens';
 
@@ -8,6 +8,12 @@ export interface AuthContext {
   id: string;
   role: Role;
   permissions: Permission[];
+}
+
+interface AuthRow {
+  id: string;
+  role: Role;
+  status: 'ACTIVE' | 'INACTIVE';
 }
 
 export async function authenticate(req: Request, _res: Response, next: NextFunction): Promise<void> {
@@ -18,10 +24,10 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
   const payload = verifyAccessToken(token);
   if (!payload) throw new AppError(401, 'Токен хүчингүй эсвэл хугацаа дууссан', 'BAD_TOKEN');
 
-  const user = await prisma.user.findFirst({
-    where: { id: payload.sub, deletedAt: null },
-    select: { id: true, role: true, status: true },
-  });
+  const user = await one<AuthRow>(
+    'SELECT id, role, status FROM users WHERE id = $1::uuid AND deleted_at IS NULL',
+    [payload.sub],
+  );
   if (!user) throw new AppError(401, 'Хэрэглэгч олдсонгүй', 'NO_USER');
   if (user.status !== 'ACTIVE') throw new AppError(403, 'Хэрэглэгч идэвхгүй байна', 'INACTIVE');
 

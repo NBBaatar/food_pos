@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { updatePeriodSchema } from '@shared/schemas';
 import { PERMISSIONS } from '@shared/permissions';
-import { prisma } from '../../db/prisma';
+import { execute, one, query } from '../../db/pool';
 import { writeAudit } from '../../lib/audit';
 import { AppError } from '../../lib/errors';
 import { minutesOfDay, windowsOverlap } from '../../lib/time';
@@ -12,25 +12,31 @@ import { requirePermission } from '../../middleware/rbac';
 const router = Router();
 router.use(authenticate);
 
+interface PeriodRow {
+  id: string;
+  code: string;
+  name: string;
+  startTime: string;
+  endTime: string;
+  crossesMidnight: boolean;
+  isActive: boolean;
+  sortOrder: number;
+}
+
+const PERIOD_SELECT = `
+  SELECT id, code, name, start_time AS "startTime", end_time AS "endTime",
+         crosses_midnight AS "crossesMidnight", is_active AS "isActive", sort_order AS "sortOrder"
+    FROM meal_periods
+`;
+
 router.get('/', async (_req, res) => {
-  const periods = await prisma.mealPeriod.findMany({ orderBy: { sortOrder: 'asc' } });
-  res.json({
-    items: periods.map((p) => ({
-      id: p.id,
-      code: p.code,
-      name: p.name,
-      startTime: p.startTime,
-      endTime: p.endTime,
-      crossesMidnight: p.crossesMidnight,
-      isActive: p.isActive,
-      sortOrder: p.sortOrder,
-    })),
-  });
+  const periods = await query<PeriodRow>(`${PERIOD_SELECT} ORDER BY sort_order ASC`);
+  res.json({ items: periods });
 });
 
 router.patch('/:id', requirePermission(PERMISSIONS.PERIOD_MANAGE), async (req, res) => {
   const input = parseBody(updatePeriodSchema, req);
-  const period = await prisma.mealPeriod.findUnique({ where: { id: pathId(req.params.id) } });
+  const period = await one<PeriodRow>(`${PERIOD_SELECT} WHERE id = $1::uuid`, [pathId(req.params.id)]);
   if (!period) throw new AppError(404, 'Хоолны цонх олдсонгүй', 'NOT_FOUND');
 
   const startTime = input.startTime ?? period.startTime;
@@ -50,7 +56,7 @@ router.patch('/:id', requirePermission(PERMISSIONS.PERIOD_MANAGE), async (req, r
   // Давхцсан цонх нь нэг уншилтыг хоёр хоол болгож, тайланг буруу болгоно.
   const willBeActive = input.isActive ?? period.isActive;
   if (willBeActive) {
-    const others = await prisma.mealPeriod.findMany({ where: { id: { not: period.id }, isActive: true } });
+    const others = await query<PeriodRow>(`${PERIOD_SELECT} WHERE id <> $1::uuid AND is_active = true`, [period.id]);
     const candidate = { startTime, endTime, crossesMidnight };
     const clash = others.find((other) => windowsOverlap(candidate, other));
     if (clash) {
@@ -62,16 +68,14 @@ router.patch('/:id', requirePermission(PERMISSIONS.PERIOD_MANAGE), async (req, r
     }
   }
 
-  const updated = await prisma.mealPeriod.update({
-    where: { id: period.id },
-    data: {
-      ...(input.name ? { name: input.name } : {}),
-      startTime,
-      endTime,
-      crossesMidnight,
-      ...(input.isActive !== undefined ? { isActive: input.isActive } : {}),
-    },
-  });
+  const updated = await one<PeriodRow>(
+    `UPDATE meal_periods
+        SET name = $2, start_time = $3, end_time = $4, crosses_midnight = $5, is_active = $6
+      WHERE id = $1::uuid
+      RETURNING id, code, name, start_time AS "startTime", end_time AS "endTime",
+                crosses_midnight AS "crossesMidnight", is_active AS "isActive", sort_order AS "sortOrder"`,
+    [period.id, input.name ?? period.name, startTime, endTime, crossesMidnight, willBeActive],
+  );
 
   await writeAudit({
     actorId: req.auth!.id,
@@ -79,7 +83,7 @@ router.patch('/:id', requirePermission(PERMISSIONS.PERIOD_MANAGE), async (req, r
     entity: 'meal_period',
     entityId: period.id,
     before: { startTime: period.startTime, endTime: period.endTime, crossesMidnight: period.crossesMidnight },
-    after: { startTime: updated.startTime, endTime: updated.endTime, crossesMidnight: updated.crossesMidnight },
+    after: { startTime, endTime, crossesMidnight },
     req,
   });
 
