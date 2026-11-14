@@ -2,6 +2,7 @@ import type { Grouping } from '@shared/meal';
 import type {
   AttendanceRow,
   DepartmentReportRow,
+  DetailedLocationRow,
   DetailedReportRow,
   IntegrityReport,
   LocationReportRow,
@@ -214,8 +215,7 @@ export async function attendance(filters: ReportFilters): Promise<AttendanceRow[
       AND ($4::uuid IS NULL OR u.department_id = $4::uuid)
       AND ($6::uuid IS NULL OR u.id = $6::uuid)
     GROUP BY u.id, u.employee_no, u.last_name, u.first_name, d.name
-    ORDER BY total DESC, u.last_name ASC
-    LIMIT 1000
+    ORDER BY total DESC, u.last_name ASC, u.id ASC
     `,
     [
       filters.from,
@@ -406,8 +406,7 @@ export async function detailed(filters: ReportFilters): Promise<DetailedReportRo
            OR (u.first_name || ' ' || u.last_name) ILIKE $9
            OR EXISTS (SELECT 1 FROM cards c JOIN card_assignments ca ON ca.card_id = c.id
                        WHERE ca.user_id = u.id AND ca.released_at IS NULL AND c.uid ILIKE $9))
-    ORDER BY "accTotal" DESC, u.last_name ASC, u.first_name ASC
-    LIMIT 5000
+    ORDER BY "accTotal" DESC, u.last_name ASC, u.first_name ASC, u.id ASC
     `,
     [
       filters.from,
@@ -450,7 +449,13 @@ export interface DetailedScanRow {
   decision: string;
   reason: string | null;
   locationName: string | null;
+  voidedAt: Date | null;
+  /** LIMIT-ээс өмнөх бүтэн тоо (тайлан хэсэгчлэн гарсан эсэхийг мэдэхэд) */
+  totalCount: number;
 }
+
+/** Excel-ийн нэг хуудаст багтах уншилтын дээд хязгаар */
+export const DETAILED_SCAN_LIMIT = 100_000;
 
 /** Шүүлтэд тохирох бүх уншилтын оролдлого — Excel-ийн «Уншилтүүд» хуудсанд */
 export async function detailedScans(filters: ReportFilters): Promise<DetailedScanRow[]> {
@@ -466,13 +471,16 @@ export async function detailedScans(filters: ReportFilters): Promise<DetailedSca
            s.card_uid AS "cardUid",
            s.decision::text AS "decision",
            s.reason,
-           l.name AS "locationName"
+           l.name AS "locationName",
+           m.voided_at AS "voidedAt",
+           COUNT(*) OVER()::int AS "totalCount"
       FROM scan_events s
       LEFT JOIN users u ON u.id = s.user_id
       LEFT JOIN companies co ON co.id = u.company_id
       LEFT JOIN departments d ON d.id = u.department_id
       LEFT JOIN meal_periods p ON p.id = s.period_id
       LEFT JOIN locations l ON l.id = s.location_id
+      LEFT JOIN meal_records m ON m.scan_event_id = s.id
      WHERE s.business_date BETWEEN $1::date AND $2::date
        AND ($3::text IS NULL OR p.code::text = $3::text)
        AND ($4::uuid IS NULL OR s.location_id = $4::uuid)
@@ -486,8 +494,8 @@ export async function detailedScans(filters: ReportFilters): Promise<DetailedSca
             OR (u.last_name || ' ' || u.first_name) ILIKE $8
             OR (u.first_name || ' ' || u.last_name) ILIKE $8
             OR s.card_uid ILIKE $8)
-     ORDER BY s.scanned_at ASC
-     LIMIT 100000
+     ORDER BY s.scanned_at ASC, s.id ASC
+     LIMIT ${DETAILED_SCAN_LIMIT}
     `,
     [
       filters.from,
@@ -500,6 +508,139 @@ export async function detailedScans(filters: ReportFilters): Promise<DetailedSca
       filters.search ? `%${filters.search}%` : null,
     ],
   );
+}
+
+/**
+ * Байршил тус бүрийн хүлээн авсан хоол ба уншилтын оролдлогын задаргаа.
+ * Бусад дэлгэрэнгүй тайлангийн шүүлтүүд (компани, хэлтэс, хоол, хайлт) мөн үйлчилнэ.
+ */
+export async function detailedByLocation(filters: ReportFilters): Promise<DetailedLocationRow[]> {
+  const rows = await query<{
+    locationId: string | null;
+    locationName: string;
+    accBreakfast: number;
+    accLunch: number;
+    accDinner: number;
+    accNight: number;
+    accTotal: number;
+    attBreakfast: number;
+    attLunch: number;
+    attDinner: number;
+    attNight: number;
+    attTotal: number;
+  }>(
+    `
+    WITH scan_agg AS (
+      SELECT s.location_id,
+             COUNT(*) FILTER (WHERE p.code = 'BREAKFAST')::int AS att_breakfast,
+             COUNT(*) FILTER (WHERE p.code = 'LUNCH')::int AS att_lunch,
+             COUNT(*) FILTER (WHERE p.code = 'DINNER')::int AS att_dinner,
+             COUNT(*) FILTER (WHERE p.code = 'NIGHT')::int AS att_night,
+             COUNT(*)::int AS att_total
+        FROM scan_events s
+        LEFT JOIN meal_periods p ON p.id = s.period_id
+        LEFT JOIN users u ON u.id = s.user_id
+       WHERE s.business_date BETWEEN $1::date AND $2::date
+         -- Ажилтны тайлангийн оролдлоготой ижил байлгахын тулд карт танигдаагүй
+         -- (user_id NULL) уншилтыг энд тооцохгүй
+         AND s.user_id IS NOT NULL
+         AND ($4::text IS NULL OR p.code::text = $4::text)
+         AND ($5::uuid IS NULL OR s.user_id = $5::uuid)
+         AND ($6::uuid IS NULL OR u.department_id = $6::uuid)
+         AND ($7::uuid IS NULL OR u.company_id = $7::uuid)
+         AND ($8::text IS NULL
+              OR u.last_name ILIKE $8
+              OR u.first_name ILIKE $8
+              OR u.employee_no ILIKE $8
+              OR (u.last_name || ' ' || u.first_name) ILIKE $8
+              OR (u.first_name || ' ' || u.last_name) ILIKE $8
+              OR s.card_uid ILIKE $8)
+         AND ($9::uuid IS NULL OR s.location_id = $9::uuid)
+       GROUP BY s.location_id
+    ), meal_agg AS (
+      SELECT s.location_id,
+             COUNT(m.id) FILTER (WHERE p.code = 'BREAKFAST')::int AS acc_breakfast,
+             COUNT(m.id) FILTER (WHERE p.code = 'LUNCH')::int AS acc_lunch,
+             COUNT(m.id) FILTER (WHERE p.code = 'DINNER')::int AS acc_dinner,
+             COUNT(m.id) FILTER (WHERE p.code = 'NIGHT')::int AS acc_night,
+             COUNT(m.id)::int AS acc_total
+        FROM meal_records m
+        JOIN scan_events s ON s.id = m.scan_event_id
+        JOIN meal_periods p ON p.id = m.period_id
+        LEFT JOIN users u ON u.id = m.user_id
+       WHERE m.business_date BETWEEN $1::date AND $2::date
+         AND ($3::boolean OR m.voided_at IS NULL)
+         AND ($4::text IS NULL OR p.code::text = $4::text)
+         AND ($5::uuid IS NULL OR m.user_id = $5::uuid)
+         AND ($6::uuid IS NULL OR u.department_id = $6::uuid)
+         AND ($7::uuid IS NULL OR u.company_id = $7::uuid)
+         AND ($8::text IS NULL
+              OR u.last_name ILIKE $8
+              OR u.first_name ILIKE $8
+              OR u.employee_no ILIKE $8
+              OR (u.last_name || ' ' || u.first_name) ILIKE $8
+              OR (u.first_name || ' ' || u.last_name) ILIKE $8
+              OR s.card_uid ILIKE $8)
+         AND ($9::uuid IS NULL OR s.location_id = $9::uuid)
+       GROUP BY s.location_id
+    ), combined AS (
+      SELECT location_id,
+             SUM(acc_breakfast)::int AS acc_breakfast,
+             SUM(acc_lunch)::int AS acc_lunch,
+             SUM(acc_dinner)::int AS acc_dinner,
+             SUM(acc_night)::int AS acc_night,
+             SUM(acc_total)::int AS acc_total,
+             SUM(att_breakfast)::int AS att_breakfast,
+             SUM(att_lunch)::int AS att_lunch,
+             SUM(att_dinner)::int AS att_dinner,
+             SUM(att_night)::int AS att_night,
+             SUM(att_total)::int AS att_total
+        FROM (
+          SELECT location_id, acc_breakfast, acc_lunch, acc_dinner, acc_night, acc_total,
+                 0 AS att_breakfast, 0 AS att_lunch, 0 AS att_dinner, 0 AS att_night, 0 AS att_total
+            FROM meal_agg
+          UNION ALL
+          SELECT location_id, 0, 0, 0, 0, 0,
+                 att_breakfast, att_lunch, att_dinner, att_night, att_total
+            FROM scan_agg
+        ) parts
+       GROUP BY location_id
+    )
+    SELECT c.location_id::text AS "locationId",
+           COALESCE(l.name, 'Байршилгүй') AS "locationName",
+           c.acc_breakfast AS "accBreakfast",
+           c.acc_lunch AS "accLunch",
+           c.acc_dinner AS "accDinner",
+           c.acc_night AS "accNight",
+           c.acc_total AS "accTotal",
+           c.att_breakfast AS "attBreakfast",
+           c.att_lunch AS "attLunch",
+           c.att_dinner AS "attDinner",
+           c.att_night AS "attNight",
+           c.att_total AS "attTotal"
+      FROM combined c
+      LEFT JOIN locations l ON l.id = c.location_id
+     ORDER BY c.acc_total DESC, c.att_total DESC, "locationName" ASC
+    `,
+    [
+      filters.from,
+      filters.to,
+      filters.includeVoided ?? false,
+      filters.period ?? null,
+      filters.userId ?? null,
+      filters.departmentId ?? null,
+      filters.companyId ?? null,
+      filters.search ? `%${filters.search}%` : null,
+      filters.locationId ?? null,
+    ],
+  );
+
+  return rows.map((row) => ({
+    locationId: row.locationId,
+    locationName: row.locationName,
+    accepted: breakdown(row.accBreakfast, row.accLunch, row.accDinner, row.accNight, row.accTotal),
+    attempts: breakdown(row.attBreakfast, row.attLunch, row.attDinner, row.attNight, row.attTotal),
+  }));
 }
 
 export async function integrity(): Promise<IntegrityReport> {

@@ -267,10 +267,11 @@ export async function recordScan(input: ScanInput, context: RecordScanContext = 
           [user.id],
         )
       : [];
+    // Хязгаарлалттай хэрэглэгчид байршил заагаагүй бол зөвшөөрөхгүй (fail-closed)
     const locationAllowed =
       allowedLocations.length === 0 ||
-      !context.locationId ||
-      allowedLocations.some((row) => row.locationId === context.locationId);
+      (Boolean(context.locationId) &&
+        allowedLocations.some((row) => row.locationId === context.locationId));
 
     if (card.cardStatus !== 'ACTIVE') {
       outcome = { ...base, decision: 'BLOCKED_CARD' };

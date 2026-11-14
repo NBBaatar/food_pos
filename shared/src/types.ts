@@ -19,6 +19,8 @@ export interface AuthUser {
   position: string | null;
   photoUrl: string | null;
   permissions: Permission[];
+  /** Түр нууц үгээр нэвтэрсэн — профайлд нууц үг солих хүртэл бусад API хаалттай */
+  mustChangePassword: boolean;
 }
 
 export interface UserPermissions {
@@ -197,11 +199,20 @@ export interface DetailedReportRow {
   lastScanAt: string | null;
 }
 
+/** Дэлгэрэнгүй тайлангийн байршил тус бүрийн задаргаа */
+export interface DetailedLocationRow {
+  locationId: string | null;
+  locationName: string;
+  accepted: PeriodBreakdown;
+  attempts: PeriodBreakdown;
+}
+
 export interface DetailedReport {
   from: string;
   to: string;
   rows: DetailedReportRow[];
   totals: { users: number; accepted: PeriodBreakdown; attempts: PeriodBreakdown };
+  byLocation: DetailedLocationRow[];
 }
 
 export interface IntegrityReport {

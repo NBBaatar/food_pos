@@ -27,6 +27,7 @@ const USER_SELECT = `
   SELECT u.id, u.employee_no AS "employeeNo", u.first_name AS "firstName", u.last_name AS "lastName",
          u.email, u.phone, u.role, u.status, u.can_login AS "canLogin", u.department_id AS "departmentId",
          d.name AS "departmentName", u.unit, u.position, u.photo_url AS "photoUrl",
+         u.must_change_password AS "mustChangePassword",
          NULL::text AS "cardUid", NULL::text AS "cardStatus",
          u.created_at AS "createdAt"
     FROM users u
@@ -55,6 +56,7 @@ router.post('/login', async (req, res) => {
     `SELECT u.id, u.employee_no AS "employeeNo", u.first_name AS "firstName", u.last_name AS "lastName",
             u.email, u.phone, u.role, u.status, u.can_login AS "canLogin", u.department_id AS "departmentId",
             d.name AS "departmentName", u.unit, u.position, u.photo_url AS "photoUrl",
+            u.must_change_password AS "mustChangePassword",
             NULL::text AS "cardUid", NULL::text AS "cardStatus",
             u.created_at AS "createdAt", u.password_hash AS "passwordHash",
             u.failed_login_attempts AS "failedLoginAttempts", u.locked_until AS "lockedUntil"
@@ -73,24 +75,29 @@ router.post('/login', async (req, res) => {
     );
   }
 
-  if (!user || !(await verifyPassword(password, user.passwordHash))) {
-    if (user) {
-      const state = onFailedLogin(user.failedLoginAttempts);
-      await execute(
-        `UPDATE users
-            SET failed_login_attempts = $2, locked_until = $3, updated_at = now()
-          WHERE id = $1::uuid`,
-        [user.id, state.failedLoginAttempts, state.lockedUntil],
-      );
-      await writeAudit({
-        actorId: user.id,
-        action: 'auth.login_failed',
-        entity: 'user',
-        entityId: user.id,
-        after: { failedLoginAttempts: state.failedLoginAttempts, locked: state.lockedUntil !== null },
-        req,
-      });
-    }
+  if (!user) {
+    // И-мэйл байхгүй үед ч ижил зарцуулалттай scrypt хийж, хэрэглэгчийг
+    // цаг хугацаагаар таних (timing) боломжийг хаана
+    await hashPassword(password);
+    throw new AppError(401, 'И-мэйл эсвэл нууц үг буруу', 'BAD_CREDENTIALS');
+  }
+
+  if (!(await verifyPassword(password, user.passwordHash))) {
+    const state = onFailedLogin(user.failedLoginAttempts);
+    await execute(
+      `UPDATE users
+          SET failed_login_attempts = $2, locked_until = $3, updated_at = now()
+        WHERE id = $1::uuid`,
+      [user.id, state.failedLoginAttempts, state.lockedUntil],
+    );
+    await writeAudit({
+      actorId: user.id,
+      action: 'auth.login_failed',
+      entity: 'user',
+      entityId: user.id,
+      after: { failedLoginAttempts: state.failedLoginAttempts, locked: state.lockedUntil !== null },
+      req,
+    });
     throw new AppError(401, 'И-мэйл эсвэл нууц үг буруу', 'BAD_CREDENTIALS');
   }
   if (user.status !== 'ACTIVE') {
@@ -123,6 +130,7 @@ router.post('/refresh', async (req, res) => {
     `SELECT u.id, u.employee_no AS "employeeNo", u.first_name AS "firstName", u.last_name AS "lastName",
             u.email, u.phone, u.role, u.status, u.can_login AS "canLogin", u.department_id AS "departmentId",
             d.name AS "departmentName", u.unit, u.position, u.photo_url AS "photoUrl",
+            u.must_change_password AS "mustChangePassword",
             NULL::text AS "cardUid", NULL::text AS "cardStatus",
             u.created_at AS "createdAt",
             rt.id AS "tokenId", rt.revoked_at AS "revokedAt", rt.expires_at AS "expiresAt"
@@ -133,7 +141,17 @@ router.post('/refresh', async (req, res) => {
     [hashToken(raw)],
   );
 
-  if (!stored || stored.revokedAt || stored.expiresAt.getTime() < Date.now()) {
+  if (!stored) {
+    res.clearCookie(REFRESH_COOKIE, cookieOptions);
+    throw new AppError(401, 'Сессийн хугацаа дууссан. Дахин нэвтэрнэ үү.', 'REFRESH_EXPIRED');
+  }
+  if (stored.revokedAt) {
+    // Хэд хэдэн tab зэрэг refresh хийхэд нэг нь хуучин токеныг эргүүлж, нөгөө нь
+    // 401 авдаг. Энэ үед cookie-г устгавал эхний tab-ийн олгосон ШИНЭ токен
+    // устаж бүх tab гарч ирнэ — тиймээс зөвхөн 401 буцааж, cookie-г үлдээнэ.
+    throw new AppError(401, 'Сессийн токен хүчингүй болсон байна', 'REFRESH_REVOKED');
+  }
+  if (stored.expiresAt.getTime() < Date.now()) {
     res.clearCookie(REFRESH_COOKIE, cookieOptions);
     throw new AppError(401, 'Сессийн хугацаа дууссан. Дахин нэвтэрнэ үү.', 'REFRESH_EXPIRED');
   }
@@ -227,6 +245,14 @@ router.patch('/profile', authenticate, async (req, res) => {
     [req.auth!.id],
   );
   if (!updated) throw new AppError(404, 'Хэрэглэгч олдсонгүй', 'NOT_FOUND');
+
+  if (input.newPassword) {
+    // Нууц үг солигдсон тул бусад төхөөрөмжийн сессийг хааж, энэ төхөөрөмжид шинэ токен олгоно
+    await execute('UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1::uuid AND revoked_at IS NULL', [
+      req.auth!.id,
+    ]);
+    await issueSession(res, updated, { ip: req.ip, userAgent: req.headers['user-agent'] });
+  }
 
   await writeAudit({
     actorId: req.auth!.id,

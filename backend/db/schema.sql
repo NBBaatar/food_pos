@@ -61,6 +61,8 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS position text;
 ALTER TABLE users ADD COLUMN IF NOT EXISTS photo_url text;
 -- Системд нэвтрэх эрхтэй болон зөвхөн карт эзэмшигч хэрэглэгчийг ялгана
 ALTER TABLE users ADD COLUMN IF NOT EXISTS can_login boolean NOT NULL DEFAULT true;
+-- Түр нууц үгээр нэвтэрсэн хэрэглэгчийг нууц үг солих хүртэл хязгаарлана
+ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_password boolean NOT NULL DEFAULT false;
 -- Хэрэглэгчийг туслан гүйцэтгэгч компанид хамааруулна
 ALTER TABLE users ADD COLUMN IF NOT EXISTS company_id uuid REFERENCES companies (id) ON DELETE SET NULL;
 CREATE INDEX IF NOT EXISTS users_company_id_idx ON users (company_id);

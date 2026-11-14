@@ -37,6 +37,24 @@ type Preset = (typeof PRESETS)[number];
 
 const initial = rangeForDays(30);
 
+/** Бүлэглэлийн бакетийн бүтэн хүрээ (7 хоног = Даваа → Ням г.м.) */
+function bucketRange(bucket: string, grouping: Grouping): { from: string; to: string } {
+  if (grouping === 'day') return { from: bucket, to: bucket };
+  const start = new Date(`${bucket}T00:00:00.000Z`);
+  let end = start;
+  if (grouping === 'week') {
+    end = new Date(start);
+    end.setUTCDate(end.getUTCDate() + 6);
+  } else if (grouping === 'month') {
+    end = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 1, 0));
+  } else if (grouping === 'quarter') {
+    end = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + 3, 0));
+  } else {
+    end = new Date(Date.UTC(start.getUTCFullYear(), 11, 31));
+  }
+  return { from: bucket, to: end.toISOString().slice(0, 10) };
+}
+
 export function ReportsPage(): JSX.Element {
   const { can } = useAuth();
   const [from, setFrom] = useState(initial.from);
@@ -95,23 +113,41 @@ export function ReportsPage(): JSX.Element {
     queryFn: () => reportsApi.byLocation(params),
   });
   const integrity = useQuery({ queryKey: ['reports', 'integrity'], queryFn: reportsApi.integrity });
+  const detailRange = detailDate ? bucketRange(detailDate, groupBy) : null;
   const detail = useQuery({
-    queryKey: ['reports', 'day-scans', detailDate, detailPage, params.period, params.departmentId, params.locationId],
+    queryKey: [
+      'reports',
+      'day-scans',
+      detailRange?.from,
+      detailRange?.to,
+      detailPage,
+      params.period,
+      params.departmentId,
+      params.locationId,
+    ],
     queryFn: () =>
       scansApi.list({
-        from: detailDate!,
-        to: detailDate!,
+        from: detailRange!.from,
+        to: detailRange!.to,
         period: params.period,
         departmentId: params.departmentId,
         locationId: params.locationId,
         page: detailPage,
         pageSize: 20,
       }),
-    enabled: Boolean(detailDate),
+    enabled: Boolean(detailRange),
   });
 
   const totals = counts.data?.totals;
   const chartRowTotals = (counts.data?.rows ?? []).reduce((acc, row) => acc + row.total, 0);
+  const locationChartData = (detailed.data?.byLocation ?? []).map((row) => ({
+    name: row.locationName,
+    total: row.accepted.total,
+    BREAKFAST: row.accepted.BREAKFAST,
+    LUNCH: row.accepted.LUNCH,
+    DINNER: row.accepted.DINNER,
+    NIGHT: row.accepted.NIGHT,
+  }));
 
   const applyPreset = (preset: Preset): void => {
     if (preset === '7 хоног') {
@@ -612,6 +648,97 @@ export function ReportsPage(): JSX.Element {
       </TabsContent>
 
       <TabsContent value="detailed" className="space-y-4">
+        {detailed.data && detailed.data.byLocation.length > 0 ? (
+          <Card>
+            <CardHeader className="flex-row items-center justify-between">
+              <div>
+                <CardTitle>Байршил тус бүрийн задаргаа</CardTitle>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Сонгосон шүүлтэд тохирох хүлээн авсан хоолыг байршлаар нь харуулна.
+                </p>
+              </div>
+              <Badge variant="outline">{formatNumber(detailed.data.byLocation.length)} байршил</Badge>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="h-[280px] w-full">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={locationChartData} margin={{ top: 8, right: 8, left: -18, bottom: 0 }}>
+                    <CartesianGrid stroke="rgba(255,255,255,0.06)" vertical={false} />
+                    <XAxis
+                      dataKey="name"
+                      tick={{ fill: 'rgba(255,255,255,0.45)', fontSize: 11 }}
+                      axisLine={false}
+                      tickLine={false}
+                    />
+                    <YAxis
+                      allowDecimals={false}
+                      tick={{ fill: 'rgba(255,255,255,0.45)', fontSize: 11 }}
+                      axisLine={false}
+                      tickLine={false}
+                      width={44}
+                    />
+                    <Tooltip
+                      cursor={{ fill: 'rgba(255,255,255,0.04)' }}
+                      contentStyle={{
+                        background: 'rgba(16,16,22,0.96)',
+                        border: '1px solid rgba(255,255,255,0.12)',
+                        borderRadius: 12,
+                        fontSize: 12,
+                      }}
+                      labelStyle={{ color: 'rgba(255,255,255,0.65)' }}
+                    />
+                    {PERIOD_CODES.map((code) => (
+                      <Bar
+                        key={code}
+                        dataKey={code}
+                        name={PERIOD_LABELS[code]}
+                        stackId="a"
+                        fill={PERIOD_COLORS[code]}
+                        radius={[2, 2, 0, 0]}
+                        maxBarSize={48}
+                      />
+                    ))}
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Байршил</TableHead>
+                      {PERIOD_CODES.map((code) => (
+                        <TableHead key={`loc-${code}`} className="text-right">
+                          {PERIOD_LABELS[code]}
+                        </TableHead>
+                      ))}
+                      <TableHead className="text-right">Нийт хүлээн авсан</TableHead>
+                      <TableHead className="text-right">Нийт оролдлого</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {detailed.data.byLocation.map((row) => (
+                      <TableRow key={row.locationId ?? 'none'}>
+                        <TableCell className="text-xs font-medium">{row.locationName}</TableCell>
+                        {PERIOD_CODES.map((code) => (
+                          <TableCell key={`${row.locationId}-${code}`} className="text-right tabular text-xs">
+                            {formatNumber(row.accepted[code])}
+                          </TableCell>
+                        ))}
+                        <TableCell className="text-right tabular text-xs font-medium">
+                          {formatNumber(row.accepted.total)}
+                        </TableCell>
+                        <TableCell className="text-right tabular text-xs text-muted-foreground">
+                          {formatNumber(row.attempts.total)}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
+
         <Card>
           <CardHeader className="flex-row flex-wrap items-center justify-between gap-2">
             <div>
@@ -623,7 +750,7 @@ export function ReportsPage(): JSX.Element {
             </div>
             {detailed.data ? (
               <div className="flex flex-wrap gap-2 text-xs">
-                <Badge variant="outline">{formatNumber(detailed.data.rows.length)} ажилтан</Badge>
+                <Badge variant="outline">{formatNumber(detailed.data.totals.users)} ажилтан</Badge>
                 <Badge variant="outline">
                   Хүлээн авсан: {formatNumber(detailed.data.totals.accepted.total)}
                 </Badge>
@@ -777,8 +904,12 @@ export function ReportsPage(): JSX.Element {
         }}
       >
         <DialogContent className="max-w-4xl">
-          <DialogHeader>
-            <DialogTitle>{detailDate} — уншилтын дэлгэрэнгүй</DialogTitle>
+          <DialogHeader>                <DialogTitle>
+                  {detailRange && detailRange.from !== detailRange.to
+                    ? `${detailRange.from} → ${detailRange.to}`
+                    : detailRange?.from}{' '}
+                  — уншилтын дэлгэрэнгүй
+                </DialogTitle>
             <DialogDescription>
               {detail.data ? `Нийт ${formatNumber(detail.data.total)} уншилт` : 'Ачаалж байна…'}
               {period !== 'all' ? ` · ${PERIOD_LABELS[period as keyof typeof PERIOD_LABELS]}` : ''}

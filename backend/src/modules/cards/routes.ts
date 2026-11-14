@@ -68,7 +68,7 @@ router.get('/', requirePermission(PERMISSIONS.CARD_READ), async (req, res) => {
   const [totalRow, cards] = await Promise.all([
     one<{ total: number }>(`SELECT COUNT(*)::int AS total FROM cards c ${whereSql}`, params),
     query<CardRow>(
-      `${CARD_SELECT} ${whereSql} ORDER BY c.created_at DESC ${limitOffset(input.page, input.pageSize)}`,
+      `${CARD_SELECT} ${whereSql} ORDER BY c.created_at DESC, c.id DESC ${limitOffset(input.page, input.pageSize)}`,
       params,
     ),
   ]);
@@ -271,7 +271,7 @@ router.get('/:id/history', requirePermission(PERMISSIONS.CARD_READ), async (req,
          FROM card_assignments ca
          JOIN users u ON u.id = ca.user_id
         WHERE ca.card_id = $1::uuid
-        ORDER BY ca.assigned_at DESC
+        ORDER BY ca.assigned_at DESC, ca.id DESC
         LIMIT 20`,
       [card.id],
     ),
@@ -291,7 +291,7 @@ router.get('/:id/history', requirePermission(PERMISSIONS.CARD_READ), async (req,
          LEFT JOIN meal_periods p ON p.id = s.period_id
          LEFT JOIN users u ON u.id = s.user_id
         WHERE s.card_id = $1::uuid
-        ORDER BY s.received_at DESC
+        ORDER BY s.received_at DESC, s.id DESC
         LIMIT 20`,
       [card.id],
     ),

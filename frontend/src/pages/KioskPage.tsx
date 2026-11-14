@@ -400,6 +400,8 @@ export function KioskPage(): JSX.Element {
           <p className="px-5 pb-5 text-xs text-muted-foreground">Байршил сонгосны дараа уншилтууд харагдана.</p>
         ) : recent.isLoading ? (
           <p className="px-5 pb-5 text-xs text-muted-foreground">Ачаалж байна…</p>
+        ) : recent.isError ? (
+          <p className="px-5 pb-5 text-xs text-rose-200">Сүүлийн уншилтыг ачаалж чадсангүй.</p>
         ) : recent.data && recent.data.items.length > 0 ? (
           <ul className="divide-y divide-white/[0.06] border-t border-white/[0.06]">
             {recent.data.items.map((item) => (

@@ -39,7 +39,15 @@ export function App(): JSX.Element {
       <Routes>
         <Route
           path="/login"
-          element={booting ? <Splash /> : user ? <Navigate to="/dashboard" replace /> : <LoginPage />}
+          element={
+            booting ? (
+              <Splash />
+            ) : user ? (
+              <Navigate to={user.mustChangePassword ? '/profile' : '/dashboard'} replace />
+            ) : (
+              <LoginPage />
+            )
+          }
         />
 
         <Route element={<AppShell />}>

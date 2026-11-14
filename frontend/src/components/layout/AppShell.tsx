@@ -226,6 +226,14 @@ export function AppShell(): JSX.Element {
           </div>
         </header>
         <main className="flex-1 px-4 pb-10 pt-6 lg:px-8">
+          {user?.mustChangePassword ? (
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-amber-400/25 bg-amber-400/10 px-4 py-3 text-xs text-amber-100">
+              <span>Түр нууц үгээр нэвтэрсэн байна. Үргэлжлүүлэхийн тулд нууц үгээ сольно уу.</span>
+              <NavLink to="/profile" className="font-medium underline underline-offset-4">
+                Профайл руу
+              </NavLink>
+            </div>
+          ) : null}
           <Outlet />
         </main>
         <SiteFooter className="mt-auto" />

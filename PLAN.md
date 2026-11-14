@@ -171,8 +171,8 @@ GET    /reports/meal-counts?from&to&groupBy=day|week|month|quarter|year
 GET    /reports/attendance          → хэн хэдэн хоол идсэн, идээгүй хүмүүс
 GET    /reports/by-department
 GET    /reports/by-location
-GET    /reports/detailed            → ажилтан/компани/хэлтэс/байршил/хоол/нэрээр шүүсэн дэлгэрэнгүй
-GET    /reports/export-detailed     → Excel: Шүүлт, Ажилтнууд, Уншилтууд
+GET    /reports/detailed            → ажилтан/компани/хэлтэс/байршил/хоол/нэрээр шүүсэн дэлгэрэнгүй + байршлын задаргаа
+GET    /reports/export-detailed     → Excel: Шүүлт, Ажилтнууд, Байршил, Уншилтууд
 GET    /reports/comparison          → өмнөх үетэй харьцуулалт (%, diff)
 GET    /reports/integrity           → scan_events ↔ meal_records зөрүү
 GET    /reports/export?format=csv|xlsx   → streaming, 100k мөр хүртэл

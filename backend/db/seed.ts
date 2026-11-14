@@ -205,6 +205,7 @@ async function main(): Promise<void> {
              $2::uuid, 'Удирдлагын нэгж', 'Системийн админ', $3, false)
      ON CONFLICT (email) DO UPDATE
        SET password_hash = EXCLUDED.password_hash, role = 'ADMIN', status = 'ACTIVE', can_login = true, deleted_at = NULL,
+           must_change_password = false, failed_login_attempts = 0, locked_until = NULL,
            unit = EXCLUDED.unit, position = EXCLUDED.position, photo_url = EXCLUDED.photo_url
      RETURNING id`,
     [adminHash, departmentIds[0], avatarDataUrl(0)],
@@ -217,6 +218,7 @@ async function main(): Promise<void> {
              $2::uuid, 'Тайлангийн нэгж', 'Менежер', $3, false)
      ON CONFLICT (email) DO UPDATE
        SET password_hash = EXCLUDED.password_hash, role = 'MANAGER', status = 'ACTIVE', can_login = true, deleted_at = NULL,
+           must_change_password = false, failed_login_attempts = 0, locked_until = NULL,
            unit = EXCLUDED.unit, position = EXCLUDED.position, photo_url = EXCLUDED.photo_url`,
     [managerHash, departmentIds[0], avatarDataUrl(1)],
   );
@@ -228,6 +230,7 @@ async function main(): Promise<void> {
              $2::uuid, 'Борлуулалтын нэгж', 'Ажилтан', $3, false)
      ON CONFLICT (email) DO UPDATE
        SET password_hash = EXCLUDED.password_hash, role = 'USER', status = 'ACTIVE', can_login = true, deleted_at = NULL,
+           must_change_password = false, failed_login_attempts = 0, locked_until = NULL,
            unit = EXCLUDED.unit, position = EXCLUDED.position, photo_url = EXCLUDED.photo_url`,
     [staffHash, departmentByName.get('Борлуулалт')!, avatarDataUrl(2)],
   );

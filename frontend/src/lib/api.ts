@@ -325,13 +325,26 @@ export async function submitScan(payload: {
   cardUid: string;
   locationId: string;
 }): Promise<ScanResult> {
-  const res = await fetch(`${BASE}/scans`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) throw await parseError(res);
-  return (await res.json()) as ScanResult;
+  // Киоск төхөөрөмж хариу хүлээж гацахаас сэргийлж 15 секундын хязгаар тавина.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15_000);
+  try {
+    const res = await fetch(`${BASE}/scans`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    if (!res.ok) throw await parseError(res);
+    return (await res.json()) as ScanResult;
+  } catch (error) {
+    if ((error as Error)?.name === 'AbortError') {
+      throw new ApiError(0, 'Сервер хариу өгсөнгүй. Дахин оролдоно уу.', 'TIMEOUT');
+    }
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export const recentScansApi = {

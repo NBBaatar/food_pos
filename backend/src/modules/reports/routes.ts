@@ -22,7 +22,9 @@ import {
   attendance,
   byDepartment,
   byLocation,
+  DETAILED_SCAN_LIMIT,
   detailed,
+  detailedByLocation,
   detailedScans,
   integrity,
   mealCounts,
@@ -229,7 +231,7 @@ const emptyBreakdown = (): PeriodBreakdown => ({ BREAKFAST: 0, LUNCH: 0, DINNER:
 router.get('/detailed', requirePermission(PERMISSIONS.REPORT_READ), async (req, res) => {
   const input = parseQuery(reportQuerySchema, req);
   const filters = toFilters(input);
-  const rows = await detailed(filters);
+  const [rows, byLocationRows] = await Promise.all([detailed(filters), detailedByLocation(filters)]);
 
   const totals = rows.reduce(
     (acc, row) => {
@@ -244,7 +246,7 @@ router.get('/detailed', requirePermission(PERMISSIONS.REPORT_READ), async (req, 
     { users: rows.filter((row) => row.accepted.total > 0 || row.attempts.total > 0).length, accepted: emptyBreakdown(), attempts: emptyBreakdown() },
   );
 
-  res.json({ ...filters, rows, totals });
+  res.json({ ...filters, rows, totals, byLocation: byLocationRows });
 });
 
 async function nameById(table: 'companies' | 'departments' | 'locations', id?: string): Promise<string | null> {
@@ -284,13 +286,16 @@ router.get('/export-detailed', requirePermission(PERMISSIONS.REPORT_EXPORT), asy
   const input = parseQuery(reportQuerySchema, req);
   const filters = toFilters(input);
 
-  const [rows, scans, companyName, departmentName, locationName] = await Promise.all([
+  const [rows, scans, byLocationRows, companyName, departmentName, locationName] = await Promise.all([
     detailed(filters),
     detailedScans(filters),
+    detailedByLocation(filters),
     nameById('companies', filters.companyId),
     nameById('departments', filters.departmentId),
     nameById('locations', filters.locationId),
   ]);
+  const scanTotal = scans[0]?.totalCount ?? scans.length;
+  const scansTruncated = scanTotal > scans.length;
 
   const workbook = new ExcelJS.Workbook();
   workbook.creator = 'Food POS';
@@ -310,6 +315,16 @@ router.get('/export-detailed', requirePermission(PERMISSIONS.REPORT_EXPORT), asy
     { label: 'Хоол', value: filters.period ? PERIOD_LABELS[filters.period as keyof typeof PERIOD_LABELS] : 'Бүх хоол' },
     { label: 'Хайлт (нэр/код/карт)', value: filters.search ?? '—' },
     { label: 'Цуцлагдсаныг тооцсон', value: filters.includeVoided ? 'Тийм' : 'Үгүй' },
+    { label: 'Нийт ажилтан (мөр)', value: String(rows.length) },
+    { label: 'Нийт уншилт (мөр)', value: String(scanTotal) },
+    ...(scansTruncated
+      ? [
+          {
+            label: 'Анхааруулга',
+            value: `Уншилтийн жагсаалт нэг хуудаст багтах дээд хязгаар (${DETAILED_SCAN_LIMIT}) хүрсэн тул эхний ${scans.length} мөр экспортлогдлоо.`,
+          },
+        ]
+      : []),
   ]);
   styleHeader(filterSheet);
 
@@ -368,6 +383,44 @@ router.get('/export-detailed', requirePermission(PERMISSIONS.REPORT_EXPORT), asy
     });
   });
 
+  const locationSheet = workbook.addWorksheet('Байршил', { views: [{ state: 'frozen', ySplit: 1 }] });
+  locationSheet.columns = [
+    { header: 'Байршил', key: 'locationName', width: 26 },
+    { header: `${PERIOD_FULL_LABELS.BREAKFAST} (хүлээн авсан)`, key: 'accBreakfast', width: 14 },
+    { header: `${PERIOD_FULL_LABELS.LUNCH} (хүлээн авсан)`, key: 'accLunch', width: 14 },
+    { header: `${PERIOD_FULL_LABELS.DINNER} (хүлээн авсан)`, key: 'accDinner', width: 14 },
+    { header: `${PERIOD_FULL_LABELS.NIGHT} (хүлээн авсан)`, key: 'accNight', width: 14 },
+    { header: 'Нийт хүлээн авсан', key: 'accTotal', width: 16 },
+    { header: 'Өглөө (оролдлого)', key: 'attBreakfast', width: 14 },
+    { header: 'Өдөр (оролдлого)', key: 'attLunch', width: 14 },
+    { header: 'Орой (оролдлого)', key: 'attDinner', width: 14 },
+    { header: 'Шөнө (оролдлого)', key: 'attNight', width: 14 },
+    { header: 'Нийт оролдлого', key: 'attTotal', width: 16 },
+  ];
+  locationSheet.addRows(
+    byLocationRows.map((row) => ({
+      locationName: row.locationName,
+      accBreakfast: row.accepted.BREAKFAST,
+      accLunch: row.accepted.LUNCH,
+      accDinner: row.accepted.DINNER,
+      accNight: row.accepted.NIGHT,
+      accTotal: row.accepted.total,
+      attBreakfast: row.attempts.BREAKFAST,
+      attLunch: row.attempts.LUNCH,
+      attDinner: row.attempts.DINNER,
+      attNight: row.attempts.NIGHT,
+      attTotal: row.attempts.total,
+    })),
+  );
+  styleHeader(locationSheet);
+  locationSheet.autoFilter = 'A1:K1';
+  locationSheet.eachRow((row, index) => {
+    if (index === 1) return;
+    row.eachCell((cell, col) => {
+      if (col >= 2) cell.alignment = { horizontal: 'right', vertical: 'middle' };
+    });
+  });
+
   const scanSheet = workbook.addWorksheet('Уншилтууд', { views: [{ state: 'frozen', ySplit: 1 }] });
   scanSheet.columns = [
     { header: 'Огноо', key: 'businessDate', width: 13 },
@@ -381,6 +434,7 @@ router.get('/export-detailed', requirePermission(PERMISSIONS.REPORT_EXPORT), asy
     { header: 'Шийдвэр', key: 'decision', width: 22 },
     { header: 'Шалтгаан', key: 'reason', width: 30 },
     { header: 'Байршил', key: 'locationName', width: 24 },
+    { header: 'Цуцлагдсан', key: 'voided', width: 12 },
   ];
   scanSheet.addRows(
     scans.map((scan) => ({
@@ -395,10 +449,11 @@ router.get('/export-detailed', requirePermission(PERMISSIONS.REPORT_EXPORT), asy
       decision: DECISION_LABELS[scan.decision as ScanDecision] ?? scan.decision,
       reason: scan.reason ?? '',
       locationName: scan.locationName ?? '—',
+      voided: scan.voidedAt ? 'Тийм' : '',
     })),
   );
   styleHeader(scanSheet);
-  scanSheet.autoFilter = 'A1:K1';
+  scanSheet.autoFilter = 'A1:L1';
 
   const buffer = await workbook.xlsx.writeBuffer();
   const filename = `detailed-report-${filters.from}_${filters.to}.xlsx`;

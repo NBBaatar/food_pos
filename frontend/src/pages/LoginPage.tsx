@@ -17,7 +17,7 @@ export function LoginPage(): JSX.Element {
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
-    if (user) navigate('/dashboard', { replace: true });
+    if (user) navigate(user.mustChangePassword ? '/profile' : '/dashboard', { replace: true });
   }, [user, navigate]);
 
   const submit = async (event: React.FormEvent): Promise<void> => {
@@ -25,8 +25,9 @@ export function LoginPage(): JSX.Element {
     setLoading(true);
     setError(null);
     try {
-      await login(email.trim(), password);
-      navigate('/dashboard', { replace: true });
+      const next = await login(email.trim(), password);
+      // Түр нууц үгээр нэвтэрсэн бол эхлээд профайл дээр солино
+      navigate(next.mustChangePassword ? '/profile' : '/dashboard', { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Нэвтрэх боломжгүй');
     } finally {

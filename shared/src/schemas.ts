@@ -7,7 +7,20 @@ const PHONE_RE = /^[0-9+\-\s()]{6,20}$/;
 const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
 
 const email = z.string().trim().min(3).max(160).regex(EMAIL_RE, 'И-мэйл буруу байна');
-const isoDate = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Огноо YYYY-MM-DD байх ёстой');
+function isRealIsoDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const [year, month, day] = value.split('-').map(Number) as [number, number, number];
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return (
+    date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day
+  );
+}
+
+/** YYYY-MM-DD бөгөөд 2026-02-31 гэх мэт байхгүй огноог татгалзана (Postgres 500-аас сэргийлнэ) */
+const isoDate = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'Огноо YYYY-MM-DD байх ёстой')
+  .refine(isRealIsoDate, 'Огноо буруу байна');
 const IMAGE_DATA_URL_RE = /^data:image\/(png|jpeg|webp|gif|svg\+xml);base64,[A-Za-z0-9+/=]+$/;
 const imageDataUrl = z
   .string()
@@ -118,7 +131,16 @@ export const voidScanSchema = z.object({
   reason: z.string().trim().min(3, 'Шалтгаан бичнэ үү').max(200),
 });
 
-export const reportQuerySchema = z.object({
+const dateRangeRefine = <T extends { from?: string; to?: string }>(value: T): boolean =>
+  !value.from || !value.to || value.from <= value.to;
+
+const dateRangeError = {
+  message: 'Эхлэх огноо дуусах огнооноос хойш байж болохгүй',
+  path: ['to'],
+};
+
+export const reportQuerySchema = z
+  .object({
   from: isoDate.optional(),
   to: isoDate.optional(),
   groupBy: z.enum(GROUPINGS).default('day'),
@@ -130,7 +152,8 @@ export const reportQuerySchema = z.object({
   /** Ажилтны нэр, код эсвэл картын UID-аар хайх */
   search: z.string().trim().max(80).optional(),
   includeVoided: z.enum(['true', 'false']).default('false'),
-});
+})
+  .refine(dateRangeRefine, dateRangeError);
 export type ReportQuery = z.infer<typeof reportQuerySchema>;
 
 export const updatePeriodSchema = z.object({
@@ -187,18 +210,20 @@ export const createDeviceSchema = z.object({
   location: z.string().trim().max(120).optional().or(z.literal('')),
 });
 
-export const listScansQuerySchema = z.object({
-  from: isoDate.optional(),
-  to: isoDate.optional(),
-  decision: z.enum(SCAN_DECISIONS).optional(),
-  userId: z.string().uuid().optional(),
-  departmentId: z.string().uuid().optional(),
-  locationId: z.string().uuid().optional(),
-  period: z.enum(PERIOD_CODES).optional(),
-  search: z.string().trim().max(80).optional(),
-  page: z.coerce.number().int().min(1).default(1),
-  pageSize: z.coerce.number().int().min(1).max(200).default(25),
-});
+export const listScansQuerySchema = z
+  .object({
+    from: isoDate.optional(),
+    to: isoDate.optional(),
+    decision: z.enum(SCAN_DECISIONS).optional(),
+    userId: z.string().uuid().optional(),
+    departmentId: z.string().uuid().optional(),
+    locationId: z.string().uuid().optional(),
+    period: z.enum(PERIOD_CODES).optional(),
+    search: z.string().trim().max(80).optional(),
+    page: z.coerce.number().int().min(1).default(1),
+    pageSize: z.coerce.number().int().min(1).max(200).default(25),
+  })
+  .refine(dateRangeRefine, dateRangeError);
 
 export const listQuerySchema = z.object({
   search: z.string().trim().max(80).optional(),

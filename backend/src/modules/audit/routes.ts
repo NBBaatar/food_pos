@@ -44,7 +44,7 @@ router.get('/', requirePermission(PERMISSIONS.AUDIT_READ), async (req, res) => {
          FROM audit_logs a
          LEFT JOIN users u ON u.id = a.actor_id
          ${whereSql}
-         ORDER BY a.created_at DESC
+         ORDER BY a.created_at DESC, a.id DESC
          ${limitOffset(input.page, input.pageSize)}`,
       params,
     ),

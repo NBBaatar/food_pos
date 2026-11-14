@@ -113,6 +113,11 @@ export function UsersPage(): JSX.Element {
 
   const users = useQuery({ queryKey: ['users', params], queryFn: () => usersApi.list(params) });
 
+  const locationNameById = useMemo(
+    () => new Map((locations.data?.items ?? []).map((location) => [location.id, location.name])),
+    [locations.data],
+  );
+
   useEffect(() => {
     setPage(1);
   }, [search, access, role, status]);
@@ -159,8 +164,13 @@ export function UsersPage(): JSX.Element {
   };
 
   const createMutation = useMutation({
-    mutationFn: () =>
-      usersApi.create({
+    mutationFn: async () => {
+      // Хоосон сонголт нь серверт "бүх байршил" гэсэн утгатай тул санамсаргүй
+      // өргөтгөлөөс сэргийлж UI дээр татгалзана.
+      if (!form.allLocations && form.locationIds.length === 0) {
+        throw new Error('Дор хаяж нэг байршил сонгоно уу');
+      }
+      return usersApi.create({
         employeeNo: form.employeeNo.trim(),
         lastName: form.lastName.trim(),
         firstName: form.firstName.trim(),
@@ -176,7 +186,8 @@ export function UsersPage(): JSX.Element {
         photoUrl: form.photoUrl ?? undefined,
         cardUid: form.cardUid.trim() || undefined,
         password: form.password.trim() || undefined,
-      }),
+      });
+    },
     onSuccess: async (data) => {
       toast.success('Хэрэглэгч нэмэгдлээ');
       setCreateOpen(false);
@@ -188,8 +199,11 @@ export function UsersPage(): JSX.Element {
   });
 
   const updateMutation = useMutation({
-    mutationFn: () =>
-      usersApi.update(editUser!.id, {
+    mutationFn: async () => {
+      if (!editForm.allLocations && editForm.locationIds.length === 0) {
+        throw new Error('Дор хаяж нэг байршил сонгоно уу');
+      }
+      return usersApi.update(editUser!.id, {
         firstName: editForm.firstName.trim(),
         lastName: editForm.lastName.trim(),
         phone: editForm.phone.trim(),
@@ -200,7 +214,8 @@ export function UsersPage(): JSX.Element {
         unit: editForm.unit.trim(),
         position: editForm.position.trim(),
         photoUrl: editForm.photoUrl,
-      }),
+      });
+    },
     onSuccess: async () => {
       toast.success('Хэрэглэгчийн мэдээлэл шинэчлэгдлээ');
       setEditUser(null);
@@ -352,6 +367,7 @@ export function UsersPage(): JSX.Element {
                 <TableRow>
                   <TableHead>Ажилтан</TableHead>
                   <TableHead>Хэлтэс</TableHead>
+                  <TableHead>Унших байршил</TableHead>
                   <TableHead>Карт</TableHead>
                   <TableHead>Эрх</TableHead>
                   <TableHead>Төлөв</TableHead>
@@ -373,6 +389,20 @@ export function UsersPage(): JSX.Element {
                       ) : null}
                     </TableCell>
                     <TableCell className="text-sm text-muted-foreground">{item.departmentName ?? '—'}</TableCell>
+                    <TableCell className="max-w-[200px] text-xs text-muted-foreground">
+                      {item.locationIds.length === 0 ? (
+                        <Badge variant="outline">Бүх байршил</Badge>
+                      ) : (
+                        <span
+                          className="line-clamp-2"
+                          title={item.locationIds
+                            .map((id) => locationNameById.get(id) ?? id)
+                            .join(', ')}
+                        >
+                          {item.locationIds.map((id) => locationNameById.get(id) ?? id).join(', ')}
+                        </span>
+                      )}
+                    </TableCell>
                     <TableCell>
                       {item.cardUid ? (
                         <span className="font-mono text-xs">{item.cardUid}</span>

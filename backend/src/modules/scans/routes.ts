@@ -6,7 +6,7 @@ import { writeAudit } from '../../lib/audit';
 import { toScanRow, type ScanRowDb } from '../../lib/dto';
 import { AppError } from '../../lib/errors';
 import { limitOffset, param } from '../../lib/sql';
-import { parseBody, parseQuery, pathId } from '../../lib/validate';
+import { parseBody, parseQuery, rawPathParam } from '../../lib/validate';
 import { authenticate } from '../../middleware/auth';
 import { authenticateOrDevice } from '../../middleware/deviceAuth';
 import { rateLimit } from '../../middleware/rateLimit';
@@ -48,7 +48,10 @@ const SCAN_SELECT = `
 `;
 
 function parseId(raw: string): string {
-  if (!/^\d+$/.test(raw)) throw new AppError(400, 'Буруу ID', 'BAD_ID');
+  // bigint мужаас хэтэрсэн тоо Postgres 500 үүсгэхээс сэргийлнэ (19 орон хүртэл)
+  if (!/^\d{1,19}$/.test(raw) || BigInt(raw) > 9_223_372_036_854_775_807n) {
+    throw new AppError(400, 'Буруу ID', 'BAD_ID');
+  }
   return raw;
 }
 
@@ -112,7 +115,7 @@ router.get('/', authenticate, requirePermission(PERMISSIONS.SCAN_READ), async (r
       params,
     ),
     query<ScanRowDb>(
-      `${SCAN_SELECT} ${whereSql} ORDER BY s.received_at DESC ${limitOffset(input.page, input.pageSize)}`,
+      `${SCAN_SELECT} ${whereSql} ORDER BY s.received_at DESC, s.id DESC ${limitOffset(input.page, input.pageSize)}`,
       params,
     ),
   ]);
@@ -134,7 +137,7 @@ router.get('/recent', async (req, res) => {
     : '';
   params.push(input.limit);
   const scans = await query<ScanRowDb>(
-    `${SCAN_SELECT} ${where} ORDER BY s.received_at DESC LIMIT $${params.length}`,
+    `${SCAN_SELECT} ${where} ORDER BY s.received_at DESC, s.id DESC LIMIT $${params.length}`,
     params,
   );
   res.json({ items: scans.map(toScanRow) });
@@ -142,7 +145,7 @@ router.get('/recent', async (req, res) => {
 
 /** Менежер/админ: алдаатай уншилтыг цуцлах (устгахгүй, audit-тай) */
 router.post('/:id/void', authenticate, requirePermission(PERMISSIONS.SCAN_CORRECT), async (req, res) => {
-  const id = parseId(pathId(req.params.id));
+  const id = parseId(rawPathParam(req.params.id));
   const { reason } = parseBody(voidScanSchema, req);
 
   const scan = await one<{ id: string; mealId: string | null; voidedAt: Date | null }>(
@@ -157,12 +160,14 @@ router.post('/:id/void', authenticate, requirePermission(PERMISSIONS.SCAN_CORREC
   if (scan.voidedAt) throw new AppError(400, 'Энэ бүртгэл аль хэдийн цуцлагдсан', 'ALREADY_VOIDED');
 
   const voidedAt = new Date();
-  await execute(
+  // Зэрэгцээ хоёр хүсэлт ижил бүртгэлийг цуцлахаас сэргийлж, өөрчлөгдсөн мөрийг шалгана
+  const changed = await execute(
     `UPDATE meal_records
         SET voided_at = $2, voided_by_id = $3::uuid, void_reason = $4
       WHERE id = $1::bigint AND voided_at IS NULL`,
     [scan.mealId, voidedAt, req.auth!.id, reason],
   );
+  if (changed === 0) throw new AppError(400, 'Энэ бүртгэл аль хэдийн цуцлагдсан', 'ALREADY_VOIDED');
 
   await writeAudit({
     actorId: req.auth!.id,

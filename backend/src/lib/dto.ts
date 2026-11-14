@@ -21,6 +21,7 @@ export interface UserRow {
   photoUrl: string | null;
   /** Зөвшөөрөгдсөн байршлын id-ууд; хоосон = бүх байршил */
   locationIds: string[] | null;
+  mustChangePassword: boolean;
   cardUid: string | null;
   cardStatus: string | null;
   createdAt: Date;
@@ -42,6 +43,7 @@ export function toAuthUser(user: UserRow, permissions: Permission[]): AuthUser {
     position: user.position ?? null,
     photoUrl: user.photoUrl ?? null,
     permissions,
+    mustChangePassword: user.mustChangePassword,
   };
 }
 

@@ -28,5 +28,24 @@ const envSchema = z.object({
   SEED_DEVICE_KEY: z.string().min(8).default('kiosk-dev-key-change-me'),
 });
 
-export const env = envSchema.parse(process.env);
+// Production-д жишээ/development утгаар ажиллахаас эхлэхэд нь сэргийлнэ
+const parsedEnv = envSchema.superRefine((value, ctx) => {
+  if (value.NODE_ENV !== 'production') return;
+  if (value.JWT_SECRET.length < 32 || value.JWT_SECRET.startsWith('dev-only-secret')) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['JWT_SECRET'],
+      message: 'Production-д 32+ тэмдэгтийн санамсаргүй JWT_SECRET шаардлагатай (openssl rand -hex 32)',
+    });
+  }
+  if (value.SEED_DEVICE_KEY === 'kiosk-dev-key-change-me') {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['SEED_DEVICE_KEY'],
+      message: 'Production-д анхдагч төхөөрөмжийн түлхүүрийг солино уу',
+    });
+  }
+});
+
+export const env = parsedEnv.parse(process.env);
 export const isProd = env.NODE_ENV === 'production';

@@ -71,7 +71,7 @@ router.get('/', requirePermission(PERMISSIONS.USER_READ), async (req, res) => {
     one<{ total: number }>(`SELECT COUNT(*)::int AS total FROM users u ${whereSql}`, params),
     query<UserRow>(
       `SELECT ${USER_COLUMNS} ${USER_FROM} ${whereSql}
-        ORDER BY u.last_name ASC, u.first_name ASC
+        ORDER BY u.last_name ASC, u.first_name ASC, u.id ASC
         ${limitOffset(input.page, input.pageSize)}`,
       params,
     ),
@@ -141,13 +141,18 @@ router.post('/', requirePermission(PERMISSIONS.USER_CREATE), async (req, res) =>
       );
       const userId = userResult.rows[0]!.id;
 
-      // Байршлын хязгаарлалт: хоосон бол бүх байршилд зөвшөөрнө
+      // Байршлын хязгаарлалт: хоосон бол бүх байршилд зөвшөөрнө.
+      // Байхгүй ID чимээгүй хасагдаж, хязгаарлалт "бүгд" болж хувирахаас сэргийлнэ.
       if (input.locationIds && input.locationIds.length > 0) {
-        await client.query(
+        const locationIds = [...new Set(input.locationIds)];
+        const inserted = await client.query(
           `INSERT INTO user_locations (user_id, location_id)
            SELECT $1::uuid, id FROM locations WHERE id = ANY($2::uuid[])`,
-          [userId, input.locationIds],
+          [userId, locationIds],
         );
+        if ((inserted.rowCount ?? 0) !== locationIds.length) {
+          throw new AppError(400, 'Сонгосон байршил бүртгэгдээгүй байна', 'INVALID_LOCATION');
+        }
       }
 
       if (input.cardUid) {
@@ -361,6 +366,18 @@ router.patch('/:id', requirePermission(PERMISSIONS.USER_UPDATE), async (req, res
   if (input.role && target.id === actor.id) {
     throw new AppError(400, 'Өөрийн эрхийг өөрчлөх боломжгүй', 'SELF_ROLE');
   }
+  if (input.status !== undefined) {
+    // Статус солих нь тусад нь эрхтэй үйлдэл — зөвхөн user:update-ээр тойрч болохгүй
+    if (!actor.permissions.includes(PERMISSIONS.USER_DEACTIVATE)) {
+      throw new AppError(403, 'Хэрэглэгчийн төлөв солих эрх хүрэхгүй', 'FORBIDDEN');
+    }
+    if (target.id === actor.id) {
+      throw new AppError(400, 'Өөрийн төлөвийг өөрчлөх боломжгүй', 'SELF_STATUS');
+    }
+  }
+  if (target.id === actor.id && input.canLogin === false) {
+    throw new AppError(400, 'Өөрийн нэвтрэх эрхийг хаах боломжгүй', 'SELF_LOGIN');
+  }
 
   const params: unknown[] = [];
   const sets: string[] = [];
@@ -404,17 +421,25 @@ router.patch('/:id', requirePermission(PERMISSIONS.USER_UPDATE), async (req, res
   const targetParam = param(params, target.id);
 
   try {
-    await execute(`UPDATE users SET ${sets.join(', ')} WHERE id = ${targetParam}::uuid`, params);
-    if (input.locationIds !== undefined) {
-      await execute('DELETE FROM user_locations WHERE user_id = $1::uuid', [target.id]);
-      if (input.locationIds.length > 0) {
-        await execute(
-          `INSERT INTO user_locations (user_id, location_id)
-           SELECT $1::uuid, id FROM locations WHERE id = ANY($2::uuid[])`,
-          [target.id, input.locationIds],
-        );
+    // Хэрэглэгч ба байршлын хязгаарлалтыг нэг транзакцаар хадгална: нэг нь
+    // бүтэлгүйтвэл нөгөө нь хагас шинэчлэгдэхгүй.
+    await withTransaction(async (client) => {
+      await client.query(`UPDATE users SET ${sets.join(', ')} WHERE id = ${targetParam}::uuid`, params);
+      if (input.locationIds !== undefined) {
+        await client.query('DELETE FROM user_locations WHERE user_id = $1::uuid', [target.id]);
+        if (input.locationIds.length > 0) {
+          const locationIds = [...new Set(input.locationIds)];
+          const inserted = await client.query(
+            `INSERT INTO user_locations (user_id, location_id)
+             SELECT $1::uuid, id FROM locations WHERE id = ANY($2::uuid[])`,
+            [target.id, locationIds],
+          );
+          if ((inserted.rowCount ?? 0) !== locationIds.length) {
+            throw new AppError(400, 'Сонгосон байршил бүртгэгдээгүй байна', 'INVALID_LOCATION');
+          }
+        }
       }
-    }
+    });
   } catch (error) {
     if (isUniqueViolation(error)) {
       throw new AppError(409, 'Ийм и-мэйл бүртгэгдсэн байна', 'DUPLICATE_EMAIL');
@@ -422,7 +447,8 @@ router.patch('/:id', requirePermission(PERMISSIONS.USER_UPDATE), async (req, res
     throw error;
   }
 
-  if (input.canLogin === false) {
+  // Нэвтрэх эрх/төлөв хаагдах эсвэл нууц үг солигдоход бүх идэвхтэй сессийг хаана
+  if (input.canLogin === false || input.status === 'INACTIVE' || input.password) {
     await execute('UPDATE refresh_tokens SET revoked_at = now() WHERE user_id = $1::uuid AND revoked_at IS NULL', [
       target.id,
     ]);

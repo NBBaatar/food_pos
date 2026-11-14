@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { PERMISSIONS } from '@shared/permissions';
-import { one, query } from '../../db/pool';
+import { execute, one, query } from '../../db/pool';
 import { writeAudit } from '../../lib/audit';
 import { AppError } from '../../lib/errors';
 import { isUniqueViolation } from '../../lib/sql';
@@ -107,7 +107,22 @@ router.delete('/:kind/:id', async (req, res) => {
   ]);
   if (!before) throw new AppError(404, `${kind.label} олдсонгүй`, 'NOT_FOUND');
 
-  await query(`DELETE FROM ${kind.table} WHERE id = $1::uuid`, [id]);
+  // Хэрэглэгчид ашиглагдаж байгаа лавлахыг устгавал тэдний талбар чимээгүй
+  // хоосорно (ON DELETE SET NULL) — тиймээс эхлээд ашиглалтыг шалгана.
+  const usageColumn = kind.table === 'units' ? 'unit' : 'position';
+  const used = await one<{ count: number }>(
+    `SELECT COUNT(*)::int AS count FROM users WHERE deleted_at IS NULL AND ${usageColumn} = $1`,
+    [before.name],
+  );
+  if ((used?.count ?? 0) > 0) {
+    throw new AppError(
+      400,
+      `Энэ ${kind.label.toLowerCase()} ${used!.count} хэрэглэгчид ашиглагдаж байна. Эхлээд тэдгээрийг өөрчилнө үү.`,
+      'REFERENCE_IN_USE',
+    );
+  }
+
+  await execute(`DELETE FROM ${kind.table} WHERE id = $1::uuid`, [id]);
   await writeAudit({
     actorId: req.auth!.id,
     action: `${kind.entity}.delete`,
