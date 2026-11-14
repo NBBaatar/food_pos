@@ -47,6 +47,8 @@ export const createUserSchema = z.object({
   role: z.enum(ROLES).default('USER'),
   departmentId: z.string().uuid().nullish(),
   companyId: z.string().uuid().nullish(),
+  /** Зөвшөөрөгдсөн байршлууд; хоосон массив = бүх байршилд зөвшөөрнө */
+  locationIds: z.array(z.string().uuid()).max(50).optional(),
   unit: z.string().trim().max(80).optional().or(z.literal('')),
   position: z.string().trim().max(80).optional().or(z.literal('')),
   photoUrl: imageDataUrl.nullable().optional(),
@@ -64,6 +66,7 @@ export const updateUserSchema = z.object({
   canLogin: z.boolean().optional(),
   departmentId: z.string().uuid().nullish(),
   companyId: z.string().uuid().nullish(),
+  locationIds: z.array(z.string().uuid()).max(50).optional(),
   unit: z.string().trim().max(80).optional().or(z.literal('')),
   position: z.string().trim().max(80).optional().or(z.literal('')),
   photoUrl: imageDataUrl.nullable().optional(),
@@ -122,7 +125,10 @@ export const reportQuerySchema = z.object({
   period: z.enum(PERIOD_CODES).optional(),
   departmentId: z.string().uuid().optional(),
   locationId: z.string().uuid().optional(),
+  companyId: z.string().uuid().optional(),
   userId: z.string().uuid().optional(),
+  /** Ажилтны нэр, код эсвэл картын UID-аар хайх */
+  search: z.string().trim().max(80).optional(),
   includeVoided: z.enum(['true', 'false']).default('false'),
 });
 export type ReportQuery = z.infer<typeof reportQuerySchema>;

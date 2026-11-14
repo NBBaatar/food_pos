@@ -52,6 +52,7 @@ export const SCAN_DECISIONS = [
   'INACTIVE_USER',
   'OUT_OF_WINDOW',
   'NO_ACTIVE_CARD',
+  'WRONG_LOCATION',
 ] as const;
 export type ScanDecision = (typeof SCAN_DECISIONS)[number];
 
@@ -63,6 +64,7 @@ export const DECISION_LABELS: Record<ScanDecision, string> = {
   INACTIVE_USER: 'Идэвхгүй хэрэглэгч',
   OUT_OF_WINDOW: 'Хоолны цагнаас гадуур',
   NO_ACTIVE_CARD: 'Карт оноогдоогүй',
+  WRONG_LOCATION: 'Өөр байршилд зөвшөөрөгдөөгүй',
 };
 
 export const GROUPINGS = ['day', 'week', 'month', 'quarter', 'year'] as const;

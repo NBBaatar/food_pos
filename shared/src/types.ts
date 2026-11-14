@@ -44,6 +44,8 @@ export interface UserListItem {
   unit: string | null;
   position: string | null;
   photoUrl: string | null;
+  /** Карт уншуулж болох байршлууд; хоосон = бүх байршилд зөвшөөрнө */
+  locationIds: string[];
   cardUid: string | null;
   cardStatus: CardStatus | null;
   createdAt: string;
@@ -166,6 +168,40 @@ export interface LocationReportRow {
   locationName: string;
   meals: number;
   uniqueUsers: number;
+}
+
+export interface PeriodBreakdown {
+  BREAKFAST: number;
+  LUNCH: number;
+  DINNER: number;
+  NIGHT: number;
+  total: number;
+}
+
+/** Ажилтан бүрийн хүлээн авсан хоол ба уншилтын оролдлогын дэлгэрэнгүй мөр */
+export interface DetailedReportRow {
+  userId: string;
+  employeeNo: string;
+  userName: string;
+  companyName: string | null;
+  departmentName: string | null;
+  unit: string | null;
+  position: string | null;
+  /** Бүртгэгдсэн (хүлээн авсан) хоол — хоолны төрлөөр */
+  accepted: PeriodBreakdown;
+  /** Бүх уншилтын оролдлого (давхар, цонхны гадна, танихгүй карт г.м.) — хоолны төрлөөр */
+  attempts: PeriodBreakdown;
+  /** Хоол авсан өдрийн тоо */
+  mealDays: number;
+  firstScanAt: string | null;
+  lastScanAt: string | null;
+}
+
+export interface DetailedReport {
+  from: string;
+  to: string;
+  rows: DetailedReportRow[];
+  totals: { users: number; accepted: PeriodBreakdown; attempts: PeriodBreakdown };
 }
 
 export interface IntegrityReport {

@@ -163,6 +163,16 @@ CREATE TABLE IF NOT EXISTS locations (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS locations_name_upper ON locations (upper(name));
 
+-- Хэрэглэгч аль байршилд карт уншуулж болох вэ.
+-- Мөр байхгүй = бүх байршилд зөвшөөрнө.
+CREATE TABLE IF NOT EXISTS user_locations (
+  user_id     uuid NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+  location_id uuid NOT NULL REFERENCES locations (id) ON DELETE CASCADE,
+  created_at  timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, location_id)
+);
+CREATE INDEX IF NOT EXISTS user_locations_location_id_idx ON user_locations (location_id);
+
 CREATE TABLE IF NOT EXISTS scan_events (
   id              bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   idempotency_key text UNIQUE,
@@ -177,7 +187,7 @@ CREATE TABLE IF NOT EXISTS scan_events (
   period_id       uuid REFERENCES meal_periods (id),
   decision        text NOT NULL CHECK (decision IN (
                     'ACCEPTED', 'ALREADY_SCANNED', 'UNKNOWN_CARD', 'BLOCKED_CARD',
-                    'INACTIVE_USER', 'OUT_OF_WINDOW', 'NO_ACTIVE_CARD')),
+                    'INACTIVE_USER', 'OUT_OF_WINDOW', 'NO_ACTIVE_CARD', 'WRONG_LOCATION')),
   reason          text,
   clock_skew_ms   integer,
   raw_payload     jsonb
@@ -187,6 +197,27 @@ CREATE INDEX IF NOT EXISTS scan_events_user_id_business_date_idx ON scan_events 
 CREATE INDEX IF NOT EXISTS scan_events_card_uid_idx ON scan_events (card_uid);
 -- Хуучин DB-д байршлын холбоосыг нэмнэ (idempotent)
 ALTER TABLE scan_events ADD COLUMN IF NOT EXISTS location_id uuid REFERENCES locations (id);
+-- Шинэ decision утгыг хуучин CHECK-тэй DB-д ч зөвшөөрнө
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conrelid = 'scan_events'::regclass
+       AND conname = 'scan_events_decision_check'
+       AND pg_get_constraintdef(oid) NOT LIKE '%WRONG_LOCATION%'
+  ) THEN
+    ALTER TABLE scan_events DROP CONSTRAINT scan_events_decision_check;
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+     WHERE conrelid = 'scan_events'::regclass
+       AND conname = 'scan_events_decision_check'
+  ) THEN
+    ALTER TABLE scan_events ADD CONSTRAINT scan_events_decision_check CHECK (decision IN (
+      'ACCEPTED', 'ALREADY_SCANNED', 'UNKNOWN_CARD', 'BLOCKED_CARD',
+      'INACTIVE_USER', 'OUT_OF_WINDOW', 'NO_ACTIVE_CARD', 'WRONG_LOCATION'));
+  END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS scan_events_received_at_idx ON scan_events (received_at);
 CREATE INDEX IF NOT EXISTS scan_events_location_received_idx ON scan_events (location_id, received_at DESC);
 

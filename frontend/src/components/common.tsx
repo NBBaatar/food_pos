@@ -108,6 +108,7 @@ const DECISION_VARIANTS: Record<ScanDecision, 'success' | 'warning' | 'danger' |
   INACTIVE_USER: 'danger',
   OUT_OF_WINDOW: 'info',
   NO_ACTIVE_CARD: 'warning',
+  WRONG_LOCATION: 'danger',
 };
 
 export function DecisionBadge({ decision }: { decision: ScanDecision }): JSX.Element {

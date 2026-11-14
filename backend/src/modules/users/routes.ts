@@ -42,6 +42,8 @@ const USER_COLUMNS = `
   u.email, u.phone, u.role, u.status, u.can_login AS "canLogin", u.department_id AS "departmentId", d.name AS "departmentName",
   u.unit, u.position, u.photo_url AS "photoUrl",
   u.company_id AS "companyId", co.name AS "companyName",
+  COALESCE((SELECT json_agg(ul.location_id::text ORDER BY ul.location_id)
+              FROM user_locations ul WHERE ul.user_id = u.id), '[]'::json) AS "locationIds",
   c.uid AS "cardUid", c.status AS "cardStatus", u.created_at AS "createdAt"
 `;
 
@@ -138,6 +140,15 @@ router.post('/', requirePermission(PERMISSIONS.USER_CREATE), async (req, res) =>
         ],
       );
       const userId = userResult.rows[0]!.id;
+
+      // Байршлын хязгаарлалт: хоосон бол бүх байршилд зөвшөөрнө
+      if (input.locationIds && input.locationIds.length > 0) {
+        await client.query(
+          `INSERT INTO user_locations (user_id, location_id)
+           SELECT $1::uuid, id FROM locations WHERE id = ANY($2::uuid[])`,
+          [userId, input.locationIds],
+        );
+      }
 
       if (input.cardUid) {
         const uid = input.cardUid.trim().toUpperCase();
@@ -385,13 +396,25 @@ router.patch('/:id', requirePermission(PERMISSIONS.USER_UPDATE), async (req, res
     sets.push(`password_hash = ${param(params, await hashPassword(input.password))}`);
     sets.push('must_change_password = false');
   }
-  if (sets.length === 0) throw new AppError(400, 'Өөрчлөх талбар байхгүй', 'NO_CHANGES');
+  if (sets.length === 0 && input.locationIds === undefined) {
+    throw new AppError(400, 'Өөрчлөх талбар байхгүй', 'NO_CHANGES');
+  }
 
   sets.push('updated_at = now()');
   const targetParam = param(params, target.id);
 
   try {
     await execute(`UPDATE users SET ${sets.join(', ')} WHERE id = ${targetParam}::uuid`, params);
+    if (input.locationIds !== undefined) {
+      await execute('DELETE FROM user_locations WHERE user_id = $1::uuid', [target.id]);
+      if (input.locationIds.length > 0) {
+        await execute(
+          `INSERT INTO user_locations (user_id, location_id)
+           SELECT $1::uuid, id FROM locations WHERE id = ANY($2::uuid[])`,
+          [target.id, input.locationIds],
+        );
+      }
+    }
   } catch (error) {
     if (isUniqueViolation(error)) {
       throw new AppError(409, 'Ийм и-мэйл бүртгэгдсэн байна', 'DUPLICATE_EMAIL');

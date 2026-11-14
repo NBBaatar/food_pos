@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { Download, Loader2, ShieldCheck } from 'lucide-react';
+import { Download, Loader2, Search, ShieldCheck } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   GROUPING_LABELS,
@@ -27,9 +27,10 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { DecisionBadge, EmptyState, ErrorState, LoadingBlock, PageHeader, StatCard } from '@/components/common';
 import { useAuth } from '@/lib/auth';
-import { departmentsApi, locationsApi, reportsApi, scansApi, type ReportQueryParams } from '@/lib/api';
+import { companiesApi, departmentsApi, locationsApi, reportsApi, scansApi, type ReportQueryParams } from '@/lib/api';
 
 const PRESETS = ['7 хоног', 'Сар', 'Улирал', 'Жил'] as const;
 type Preset = (typeof PRESETS)[number];
@@ -48,6 +49,10 @@ export function ReportsPage(): JSX.Element {
   const [exporting, setExporting] = useState(false);
   const [detailDate, setDetailDate] = useState<string | null>(null);
   const [detailPage, setDetailPage] = useState(1);
+  const [tab, setTab] = useState<'summary' | 'detailed'>('summary');
+  const [companyId, setCompanyId] = useState('all');
+  const [searchInput, setSearchInput] = useState('');
+  const [search, setSearch] = useState('');
 
   const params: ReportQueryParams = {
     from,
@@ -59,10 +64,28 @@ export function ReportsPage(): JSX.Element {
     includeVoided,
   };
 
+  // Хайлтын талбарыг 300ms хүлээж нэг л хүсэлт илгээнэ
+  useEffect(() => {
+    const timer = setTimeout(() => setSearch(searchInput.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
+
+  const detailedParams: ReportQueryParams = {
+    ...params,
+    companyId: companyId === 'all' ? undefined : companyId,
+    search: search || undefined,
+  };
+
   const summary = useQuery({ queryKey: ['reports', 'summary', params], queryFn: () => reportsApi.summary(params) });
   const counts = useQuery({ queryKey: ['reports', 'counts', params], queryFn: () => reportsApi.mealCounts(params) });
   const departments = useQuery({ queryKey: ['departments'], queryFn: departmentsApi.list });
   const locations = useQuery({ queryKey: ['locations'], queryFn: locationsApi.list });
+  const companies = useQuery({ queryKey: ['companies'], queryFn: companiesApi.list });
+  const detailed = useQuery({
+    queryKey: ['reports', 'detailed', detailedParams],
+    queryFn: () => reportsApi.detailed(detailedParams),
+    enabled: tab === 'detailed',
+  });
   const deptReport = useQuery({
     queryKey: ['reports', 'departments', params],
     queryFn: () => reportsApi.byDepartment(params),
@@ -120,7 +143,10 @@ export function ReportsPage(): JSX.Element {
   const exportExcel = async (): Promise<void> => {
     setExporting(true);
     try {
-      const { blob, filename } = await reportsApi.exportExcel(params);
+      const { blob, filename } =
+        tab === 'detailed'
+          ? await reportsApi.exportDetailed(detailedParams)
+          : await reportsApi.exportExcel(params);
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
@@ -145,16 +171,22 @@ export function ReportsPage(): JSX.Element {
     <div className="animate-fade-up">
       <PageHeader
         title="Тайлан"
-        description="Өдөр, 7 хоног, сар, улирал, жилээр хоолны бүртгэлийг нарийвчлан гаргана."
+        description="Өдөр, 7 хоног, сар, улирал, жилээр бүлэглэх ба ажилтан, компани, байршлаар нарийвчлан шүүж Excel-д экспортлоно."
         actions={
           can(PERMISSIONS.REPORT_EXPORT) ? (
             <Button size="sm" variant="secondary" className="gap-2" onClick={exportExcel} disabled={exporting}>
               {exporting ? <Loader2 className="size-4 animate-spin" /> : <Download className="size-4" />}
-              Excel татах
+              {tab === 'detailed' ? 'Excel татах (дэлгэрэнгүй)' : 'Excel татах'}
             </Button>
           ) : null
         }
       />
+
+      <Tabs value={tab} onValueChange={(value) => setTab(value as 'summary' | 'detailed')}>
+        <TabsList className="mb-4">
+          <TabsTrigger value="summary">Хураангуй</TabsTrigger>
+          <TabsTrigger value="detailed">Дэлгэрэнгүй (ажилтан, компани)</TabsTrigger>
+        </TabsList>
 
       <Card className="mb-4 p-4">
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-6">
@@ -166,21 +198,23 @@ export function ReportsPage(): JSX.Element {
             <Label>Дуусах</Label>
             <Input type="date" value={to} onChange={(event) => setTo(event.target.value)} />
           </div>
-          <div className="space-y-1">
-            <Label>Бүлэглэл</Label>
-            <Select value={groupBy} onValueChange={(value) => setGroupBy(value as Grouping)}>
-              <SelectTrigger>
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {GROUPINGS.map((item) => (
-                  <SelectItem key={item} value={item}>
-                    {GROUPING_LABELS[item]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
+          {tab === 'summary' ? (
+            <div className="space-y-1">
+              <Label>Бүлэглэл</Label>
+              <Select value={groupBy} onValueChange={(value) => setGroupBy(value as Grouping)}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {GROUPINGS.map((item) => (
+                    <SelectItem key={item} value={item}>
+                      {GROUPING_LABELS[item]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          ) : null}
           <div className="space-y-1">
             <Label>Хоол</Label>
             <Select value={period} onValueChange={setPeriod}>
@@ -231,6 +265,39 @@ export function ReportsPage(): JSX.Element {
           </div>
         </div>
 
+        {tab === 'detailed' ? (
+          <div className="mt-3 grid gap-3 border-t border-white/[0.06] pt-3 sm:grid-cols-2">
+            <div className="space-y-1">
+              <Label>Туслан гүйцэтгэгч компани</Label>
+              <Select value={companyId} onValueChange={setCompanyId}>
+                <SelectTrigger>
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="all">Бүх компани</SelectItem>
+                  {(companies.data?.items ?? []).map((company) => (
+                    <SelectItem key={company.id} value={company.id}>
+                      {company.name} ({company.userCount})
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="space-y-1">
+              <Label>Ажилтан хайх (нэр, код, карт)</Label>
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={searchInput}
+                  onChange={(event) => setSearchInput(event.target.value)}
+                  placeholder="Жишээ: Бат, EMP-0012, 04A1B2"
+                  className="pl-9"
+                />
+              </div>
+            </div>
+          </div>
+        ) : null}
+
         <div className="mt-3 flex flex-wrap items-center gap-2">
           {PRESETS.map((preset) => (
             <Button key={preset} variant="ghost" size="sm" onClick={() => applyPreset(preset)}>
@@ -249,6 +316,7 @@ export function ReportsPage(): JSX.Element {
         </div>
       </Card>
 
+      <TabsContent value="summary" className="space-y-4">
       {summary.isLoading ? (
         <LoadingBlock />
       ) : summary.isError ? (
@@ -541,6 +609,163 @@ export function ReportsPage(): JSX.Element {
           </div>
         </>
       ) : null}
+      </TabsContent>
+
+      <TabsContent value="detailed" className="space-y-4">
+        <Card>
+          <CardHeader className="flex-row flex-wrap items-center justify-between gap-2">
+            <div>
+              <CardTitle>Ажилтны дэлгэрэнгүй тайлан</CardTitle>
+              <p className="mt-1 text-xs text-muted-foreground">
+                Хүлээн авсан хоол, уншилтын оролдлого, хоолны төрөл тус бүрээр. Excel файл нь шүүлт,
+                ажилтнууд болон бүх уншилтын оролдлогыг тусад нь хуудсанд агуулна.
+              </p>
+            </div>
+            {detailed.data ? (
+              <div className="flex flex-wrap gap-2 text-xs">
+                <Badge variant="outline">{formatNumber(detailed.data.rows.length)} ажилтан</Badge>
+                <Badge variant="outline">
+                  Хүлээн авсан: {formatNumber(detailed.data.totals.accepted.total)}
+                </Badge>
+                <Badge variant="outline">
+                  Оролдлого: {formatNumber(detailed.data.totals.attempts.total)}
+                </Badge>
+              </div>
+            ) : null}
+          </CardHeader>
+          <CardContent className="p-0">
+            {detailed.isLoading ? (
+              <div className="p-4">
+                <LoadingBlock />
+              </div>
+            ) : detailed.isError ? (
+              <div className="p-4">
+                <ErrorState message={(detailed.error as Error).message} />
+              </div>
+            ) : detailed.data && detailed.data.rows.length > 0 ? (
+              <div className="overflow-x-auto">
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead rowSpan={2}>Ажилтан</TableHead>
+                      <TableHead rowSpan={2}>Компани</TableHead>
+                      <TableHead rowSpan={2}>Хэлтэс</TableHead>
+                      <TableHead rowSpan={2}>Нэгж / тушаал</TableHead>
+                      <TableHead colSpan={5} className="border-l border-white/[0.08] text-center">
+                        Хүлээн авсан
+                      </TableHead>
+                      <TableHead colSpan={5} className="border-l border-white/[0.08] text-center">
+                        Оролдлого
+                      </TableHead>
+                      <TableHead rowSpan={2} className="border-l border-white/[0.08] text-right">
+                        Хоол авсан өдөр
+                      </TableHead>
+                      <TableHead rowSpan={2} className="text-right">
+                        Сүүлийн уншилт
+                      </TableHead>
+                    </TableRow>
+                    <TableRow>
+                      {PERIOD_CODES.map((code) => (
+                        <TableHead key={`acc-${code}`} className="text-right text-[11px] font-normal">
+                          {PERIOD_LABELS[code]}
+                        </TableHead>
+                      ))}
+                      <TableHead className="text-right text-[11px]">Нийт</TableHead>
+                      {PERIOD_CODES.map((code) => (
+                        <TableHead
+                          key={`att-${code}`}
+                          className="border-l-0 text-right text-[11px] font-normal"
+                        >
+                          {PERIOD_LABELS[code]}
+                        </TableHead>
+                      ))}
+                      <TableHead className="text-right text-[11px]">Нийт</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {detailed.data.rows.map((row) => (
+                      <TableRow key={row.userId}>
+                        <TableCell className="whitespace-nowrap">
+                          <p className="text-xs font-medium">{row.userName}</p>
+                          <p className="text-[11px] text-muted-foreground">{row.employeeNo}</p>
+                        </TableCell>
+                        <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                          {row.companyName ?? '—'}
+                        </TableCell>
+                        <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                          {row.departmentName ?? '—'}
+                        </TableCell>
+                        <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                          {row.unit ?? '—'}
+                          {row.position ? ` · ${row.position}` : ''}
+                        </TableCell>
+                        {PERIOD_CODES.map((code) => (
+                          <TableCell key={`acc-${row.userId}-${code}`} className="text-right tabular text-xs">
+                            {formatNumber(row.accepted[code])}
+                          </TableCell>
+                        ))}
+                        <TableCell className="text-right tabular text-xs font-medium">
+                          {formatNumber(row.accepted.total)}
+                        </TableCell>
+                        {PERIOD_CODES.map((code) => (
+                          <TableCell
+                            key={`att-${row.userId}-${code}`}
+                            className="border-l border-white/[0.05] text-right tabular text-xs text-muted-foreground"
+                          >
+                            {formatNumber(row.attempts[code])}
+                          </TableCell>
+                        ))}
+                        <TableCell className="text-right tabular text-xs font-medium text-muted-foreground">
+                          {formatNumber(row.attempts.total)}
+                        </TableCell>
+                        <TableCell className="border-l border-white/[0.05] text-right tabular text-xs">
+                          {formatNumber(row.mealDays)}
+                        </TableCell>
+                        <TableCell className="whitespace-nowrap text-right tabular text-xs text-muted-foreground">
+                          {row.lastScanAt
+                            ? new Date(row.lastScanAt).toLocaleString('mn-MN', {
+                                timeZone: 'Asia/Ulaanbaatar',
+                                month: '2-digit',
+                                day: '2-digit',
+                                hour: '2-digit',
+                                minute: '2-digit',
+                              })
+                            : '—'}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-white/10 px-4 py-3 text-xs">
+                  <span className="text-muted-foreground">НИЙТ</span>
+                  <div className="flex flex-wrap gap-4 tabular">
+                    <span>
+                      Хүлээн авсан:{' '}
+                      <span className="font-semibold text-primary">
+                        {formatNumber(detailed.data.totals.accepted.total)}
+                      </span>
+                    </span>
+                    <span>
+                      Оролдлого:{' '}
+                      <span className="font-semibold">
+                        {formatNumber(detailed.data.totals.attempts.total)}
+                      </span>
+                    </span>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="p-4">
+                <EmptyState
+                  title="Тохирох ажилтан алга"
+                  description="Сонгосон компани, хайлт эсвэл хугацаанд тохирох бүртгэл олдсонгүй."
+                />
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      </TabsContent>
+      </Tabs>
 
       <Dialog
         open={Boolean(detailDate)}

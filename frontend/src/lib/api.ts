@@ -7,6 +7,7 @@ import type {
   CardListItem,
   CompanyItem,
   DepartmentReportRow,
+  DetailedReport,
   IntegrityReport,
   LocationItem,
   LocationReportRow,
@@ -153,7 +154,9 @@ export interface ReportQueryParams {
   groupBy?: Grouping;
   period?: PeriodCode;
   departmentId?: string;
+  companyId?: string;
   locationId?: string;
+  search?: string;
   includeVoided?: boolean;
 }
 
@@ -164,7 +167,9 @@ function reportQuery(params: ReportQueryParams): string {
   if (params.groupBy) search.set('groupBy', params.groupBy);
   if (params.period) search.set('period', params.period);
   if (params.departmentId) search.set('departmentId', params.departmentId);
+  if (params.companyId) search.set('companyId', params.companyId);
   if (params.locationId) search.set('locationId', params.locationId);
+  if (params.search) search.set('search', params.search);
   if (params.includeVoided) search.set('includeVoided', 'true');
   return search.toString();
 }
@@ -203,6 +208,8 @@ export const reportsApi = {
     request<{ rows: DepartmentReportRow[] }>(`/reports/by-department?${reportQuery(params)}`),
   byLocation: (params: ReportQueryParams) =>
     request<{ rows: LocationReportRow[] }>(`/reports/by-location?${reportQuery(params)}`),
+  detailed: (params: ReportQueryParams) =>
+    request<DetailedReport>(`/reports/detailed?${reportQuery(params)}`),
   integrity: () => request<IntegrityReport>('/reports/integrity'),
   async exportExcel(params: ReportQueryParams): Promise<{ blob: Blob; filename: string }> {
     const res = await rawRequest(`/reports/export?${reportQuery(params)}`, {}, true);
@@ -210,6 +217,13 @@ export const reportsApi = {
     const disposition = res.headers.get('content-disposition') ?? '';
     const match = /filename="([^"]+)"/.exec(disposition);
     return { blob: await res.blob(), filename: match?.[1] ?? 'meal-report.csv' };
+  },
+  async exportDetailed(params: ReportQueryParams): Promise<{ blob: Blob; filename: string }> {
+    const res = await rawRequest(`/reports/export-detailed?${reportQuery(params)}`, {}, true);
+    if (!res.ok) throw await parseError(res);
+    const disposition = res.headers.get('content-disposition') ?? '';
+    const match = /filename="([^"]+)"/.exec(disposition);
+    return { blob: await res.blob(), filename: match?.[1] ?? 'detailed-report.xlsx' };
   },
 };
 

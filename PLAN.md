@@ -67,6 +67,7 @@ users(id, employee_no UNIQUE, first_name, last_name, email UNIQUE, phone,
     -- 5 удаа буруу нэвтрэлт → locked_until = now() + 15 мин
 -- Ролийн үндсэн эрх: shared/src/permissions.ts → ROLE_PERMISSIONS (код дотор)
 user_permissions(user_id, permission_code, allow)   -- хэрэглэгч тус бүрийн override
+user_locations(user_id, location_id)                -- зөвшөөрөгдсөн байршил; хоосон = бүгд
 refresh_tokens(id, user_id, token_hash, expires_at, revoked_at, ip, user_agent)
 
 cards(id, uid UNIQUE, label, type, status, issued_at, blocked_at,
@@ -146,6 +147,7 @@ GET    /users?search&role&status&departmentId&page
 POST   /users                       ← 'user:create'
 GET    /users/:id                   → карт, сүүлийн уншилт, статистик
 PATCH  /users/:id                   ← 'user:update'
+PATCH  /users/:id                   body: { ..., locationIds: [] }  (хоосон = бүх байршил)
 GET    /users/:id/permissions       ← 'user:read'  (үндсэн эрх + override)
 PUT    /users/:id/permissions       ← ADMIN        (override-уудыг бүхэлд нь солино)
 PATCH  /users/:id/status            ← 'user:deactivate'
@@ -169,6 +171,8 @@ GET    /reports/meal-counts?from&to&groupBy=day|week|month|quarter|year
 GET    /reports/attendance          → хэн хэдэн хоол идсэн, идээгүй хүмүүс
 GET    /reports/by-department
 GET    /reports/by-location
+GET    /reports/detailed            → ажилтан/компани/хэлтэс/байршил/хоол/нэрээр шүүсэн дэлгэрэнгүй
+GET    /reports/export-detailed     → Excel: Шүүлт, Ажилтнууд, Уншилтууд
 GET    /reports/comparison          → өмнөх үетэй харьцуулалт (%, diff)
 GET    /reports/integrity           → scan_events ↔ meal_records зөрүү
 GET    /reports/export?format=csv|xlsx   → streaming, 100k мөр хүртэл

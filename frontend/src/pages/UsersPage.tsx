@@ -32,7 +32,7 @@ import { ReferenceCombobox } from '@/components/ui/reference-combobox';
 import { EmptyState, ErrorState, LoadingBlock, PageHeader } from '@/components/common';
 import { useAuth } from '@/lib/auth';
 import { imageFileToDataUrl } from '@/lib/image';
-import { companiesApi, departmentsApi, referenceApi, usersApi } from '@/lib/api';
+import { companiesApi, departmentsApi, locationsApi, referenceApi, usersApi } from '@/lib/api';
 
 interface FormState {
   employeeNo: string;
@@ -44,6 +44,9 @@ interface FormState {
   canLogin: boolean;
   departmentId: string;
   companyId: string;
+  /** Бүх байршилд уншуулж болох эсэх; false бол locationIds-д жагсаасан байршилд л */
+  allLocations: boolean;
+  locationIds: string[];
   unit: string;
   position: string;
   photoUrl: string | null;
@@ -61,6 +64,8 @@ const EMPTY_FORM: FormState = {
   canLogin: true,
   departmentId: 'none',
   companyId: 'none',
+  allLocations: true,
+  locationIds: [],
   unit: '',
   position: '',
   photoUrl: null,
@@ -87,6 +92,7 @@ export function UsersPage(): JSX.Element {
 
   const departments = useQuery({ queryKey: ['departments'], queryFn: departmentsApi.list });
   const companies = useQuery({ queryKey: ['companies'], queryFn: companiesApi.list });
+  const locations = useQuery({ queryKey: ['locations'], queryFn: locationsApi.list });
   const units = useQuery({ queryKey: ['reference', 'units'], queryFn: () => referenceApi.list('units') });
   const positions = useQuery({
     queryKey: ['reference', 'positions'],
@@ -142,6 +148,8 @@ export function UsersPage(): JSX.Element {
       canLogin: item.canLogin,
       departmentId: item.departmentId ?? 'none',
       companyId: item.companyId ?? 'none',
+      allLocations: (item.locationIds ?? []).length === 0,
+      locationIds: item.locationIds ?? [],
       unit: item.unit ?? '',
       position: item.position ?? '',
       photoUrl: item.photoUrl ?? null,
@@ -162,6 +170,7 @@ export function UsersPage(): JSX.Element {
         canLogin: form.canLogin,
         departmentId: form.departmentId === 'none' ? null : form.departmentId,
         companyId: form.companyId === 'none' ? null : form.companyId,
+        locationIds: form.allLocations ? [] : form.locationIds,
         unit: form.unit.trim() || undefined,
         position: form.position.trim() || undefined,
         photoUrl: form.photoUrl ?? undefined,
@@ -187,6 +196,7 @@ export function UsersPage(): JSX.Element {
         canLogin: editForm.canLogin,
         departmentId: editForm.departmentId === 'none' ? null : editForm.departmentId,
         companyId: editForm.companyId === 'none' ? null : editForm.companyId,
+        locationIds: editForm.allLocations ? [] : editForm.locationIds,
         unit: editForm.unit.trim(),
         position: editForm.position.trim(),
         photoUrl: editForm.photoUrl,
@@ -530,6 +540,14 @@ export function UsersPage(): JSX.Element {
                 </SelectContent>
               </Select>
             </div>
+            <div className="space-y-1.5 sm:col-span-2">
+              <LocationAccessField
+                all={form.allLocations}
+                ids={form.locationIds}
+                options={locations.data?.items ?? []}
+                onChange={(next) => setForm({ ...form, allLocations: next.all, locationIds: next.ids })}
+              />
+            </div>
             <div className="space-y-1.5">
               <Label>Нэгж</Label>
               <ReferenceCombobox
@@ -743,6 +761,16 @@ export function UsersPage(): JSX.Element {
                 </SelectContent>
               </Select>
             </div>
+            <div className="space-y-1.5 sm:col-span-2">
+              <LocationAccessField
+                all={editForm.allLocations}
+                ids={editForm.locationIds}
+                options={locations.data?.items ?? []}
+                onChange={(next) =>
+                  setEditForm({ ...editForm, allLocations: next.all, locationIds: next.ids })
+                }
+              />
+            </div>
             <div className="space-y-1.5">
               <Label>Нэгж</Label>
               <ReferenceCombobox
@@ -915,6 +943,79 @@ export function UsersPage(): JSX.Element {
           Сүүлд шинэчлэгдсэн: {formatDate(new Date())}
         </p>
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * Хэрэглэгч аль байршилд карт уншуулж болохыг сонгоно.
+ * «Бүх байршилд» чагтлагдсан бол хязгаарлалтгүй (серверт хоосон массив илгээнэ).
+ */
+function LocationAccessField({
+  all,
+  ids,
+  options,
+  onChange,
+}: {
+  all: boolean;
+  ids: string[];
+  options: { id: string; name: string }[];
+  onChange: (next: { all: boolean; ids: string[] }) => void;
+}): JSX.Element {
+  return (
+    <div className="space-y-2">
+      <Label>Уншиж болох байршил</Label>
+      <div className="rounded-xl border border-white/10 bg-white/[0.03] p-3">
+        <label className="flex cursor-pointer items-start gap-3">
+          <input
+            type="checkbox"
+            checked={all}
+            onChange={(event) =>
+              onChange({
+                all: event.target.checked,
+                ids: event.target.checked ? [] : options.map((option) => option.id),
+              })
+            }
+            className="mt-0.5 size-4 accent-emerald-400"
+          />
+          <span>
+            <span className="block text-sm font-medium">Бүх байршилд уншуулж болно</span>
+            <span className="text-xs text-muted-foreground">
+              Хязгаарлалтгүй. Зөвхөн тодорхой байршилд уншуулах бол чагтыг авч, доороос сонгоно уу.
+            </span>
+          </span>
+        </label>
+
+        {!all ? (
+          <div className="mt-3 space-y-1.5 border-t border-white/10 pt-3">
+            {options.length === 0 ? (
+              <p className="text-xs text-muted-foreground">Байршил бүртгэгдээгүй байна.</p>
+            ) : (
+              options.map((option) => (
+                <label key={option.id} className="flex cursor-pointer items-center gap-2.5 text-sm">
+                  <input
+                    type="checkbox"
+                    checked={ids.includes(option.id)}
+                    onChange={(event) =>
+                      onChange({
+                        all: false,
+                        ids: event.target.checked
+                          ? [...ids, option.id]
+                          : ids.filter((id) => id !== option.id),
+                      })
+                    }
+                    className="size-4 accent-emerald-400"
+                  />
+                  {option.name}
+                </label>
+              ))
+            )}
+            <p className="pt-1 text-[11px] text-muted-foreground">
+              Сонгосон байршлаас өөр газар карт уншуулбал хоол тооцогдохгүй.
+            </p>
+          </div>
+        ) : null}
+      </div>
     </div>
   );
 }

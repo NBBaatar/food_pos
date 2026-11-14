@@ -52,6 +52,7 @@ const RESULT_STYLE: Record<string, { ring: string; text: string; icon: typeof Ch
   INACTIVE_USER: { ring: 'border-rose-400/40 bg-rose-400/10', text: 'text-rose-200', icon: XCircle },
   OUT_OF_WINDOW: { ring: 'border-sky-400/40 bg-sky-400/10', text: 'text-sky-200', icon: ShieldAlert },
   NO_ACTIVE_CARD: { ring: 'border-amber-400/40 bg-amber-400/10', text: 'text-amber-200', icon: ShieldAlert },
+  WRONG_LOCATION: { ring: 'border-rose-400/40 bg-rose-400/10', text: 'text-rose-200', icon: XCircle },
 };
 
 export function KioskPage(): JSX.Element {

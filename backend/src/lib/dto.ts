@@ -19,6 +19,8 @@ export interface UserRow {
   unit: string | null;
   position: string | null;
   photoUrl: string | null;
+  /** Зөвшөөрөгдсөн байршлын id-ууд; хоосон = бүх байршил */
+  locationIds: string[] | null;
   cardUid: string | null;
   cardStatus: string | null;
   createdAt: Date;
@@ -61,6 +63,7 @@ export function toUserListItem(user: UserRow): UserListItem {
     unit: user.unit ?? null,
     position: user.position ?? null,
     photoUrl: user.photoUrl ?? null,
+    locationIds: user.locationIds ?? [],
     cardUid: user.cardUid ?? null,
     cardStatus: (user.cardStatus as UserListItem['cardStatus']) ?? null,
     createdAt: user.createdAt.toISOString(),

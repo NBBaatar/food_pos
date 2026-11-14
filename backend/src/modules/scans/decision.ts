@@ -82,6 +82,8 @@ function messageFor(decision: Decision, opts: { name?: string; period?: string; 
       return 'Карт хэрэглэгчид оноогдоогүй байна';
     case 'OUT_OF_WINDOW':
       return `Хоолны цагнаас гадуур (${opts.clock ?? ''})`;
+    case 'WRONG_LOCATION':
+      return `${opts.name ?? 'Хэрэглэгч'} энэ байршилд уншуулах эрхгүй байна`;
     default:
       return 'Бүртгэл хийгдсэн';
   }
@@ -254,6 +256,22 @@ export async function recordScan(input: ScanInput, context: RecordScanContext = 
       ...profile,
     };
 
+    // Хэрэглэгчид байршлын хязгаарлалт байвал зөвхөн тэдгээр байршилд уншуулна.
+    // Хязгаарлалт байхгүй (мөр байхгүй) бол бүх байршилд зөвшөөрнө.
+    const allowedLocations = user
+      ? await query<{ locationId: string; name: string }>(
+          `SELECT ul.location_id::text AS "locationId", l.name
+             FROM user_locations ul
+             JOIN locations l ON l.id = ul.location_id
+            WHERE ul.user_id = $1::uuid`,
+          [user.id],
+        )
+      : [];
+    const locationAllowed =
+      allowedLocations.length === 0 ||
+      !context.locationId ||
+      allowedLocations.some((row) => row.locationId === context.locationId);
+
     if (card.cardStatus !== 'ACTIVE') {
       outcome = { ...base, decision: 'BLOCKED_CARD' };
       outcomeReason = card.blockReason ?? card.cardStatus;
@@ -264,6 +282,9 @@ export async function recordScan(input: ScanInput, context: RecordScanContext = 
     } else if (card.userStatus !== 'ACTIVE' || card.deletedAt) {
       outcome = { ...base, decision: 'INACTIVE_USER' };
       outcomeReason = 'Хэрэглэгч идэвхгүй';
+    } else if (!locationAllowed) {
+      outcome = { ...base, decision: 'WRONG_LOCATION' };
+      outcomeReason = `Зөвшөөрөгдсөн байршил: ${allowedLocations.map((row) => row.name).join(', ')}`;
     } else {
       const existingMeal = await findExistingMeal(user.id, businessDateIso, period.id);
 
