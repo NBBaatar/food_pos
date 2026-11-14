@@ -27,7 +27,7 @@ test-results/
 
 # Локал Postgres кластер (dev)
 .pgdata/
-
+.freebuff
 
 # Runtime artifacts (экспорт, upload)
 uploads/

@@ -48,7 +48,7 @@ business_date = (scanned_at AT TIME ZONE 'Asia/Ulaanbaatar' - interval '{day_sta
 | Audit log харах | ✅ | ❌ | ❌ |
 | Системийн тохиргоо, нөөц хуулбар | ✅ | ❌ | ❌ |
 
-Хэрэгжүүлэлт: `requirePermission('report:read')` middleware + `permissions` хүснэгт (role default) + хэрэглэгч тус бүрийн override.
+Хэрэгжүүлэлт: `requirePermission('report:read')` middleware + `ROLE_PERMISSIONS` (ролийн үндсэн эрх) + `user_permissions` хүснэгтийн override. Override-ыг зөвхөн ADMIN `/users/:id/permissions`-аар удирдана; ADMIN супер хэрэглэгч тул override хүлээж авахгүй.
 
 ---
 
@@ -56,12 +56,17 @@ business_date = (scanned_at AT TIME ZONE 'Asia/Ulaanbaatar' - interval '{day_sta
 
 ```
 departments(id, name, code, parent_id)
+units(id, name UNIQUE)          -- нэгж лавлах
+positions(id, name UNIQUE)      -- албан тушаал лавлах
+companies(id, name UNIQUE)      -- туслан гүйцэтгэгч компани
 users(id, employee_no UNIQUE, first_name, last_name, email UNIQUE, phone,
-      password_hash, role, status, department_id, must_change_password,
+      password_hash, role, status, department_id, company_id, unit, position,
+      photo_url, can_login, must_change_password,
+      failed_login_attempts, locked_until,
       last_login_at, created_at, updated_at, deleted_at)
-permissions(code, description)              -- 'user:create', 'report:read', ...
-role_permissions(role, permission_code)
-user_permissions(user_id, permission_code, allow)   -- override
+    -- 5 удаа буруу нэвтрэлт → locked_until = now() + 15 мин
+-- Ролийн үндсэн эрх: shared/src/permissions.ts → ROLE_PERMISSIONS (код дотор)
+user_permissions(user_id, permission_code, allow)   -- хэрэглэгч тус бүрийн override
 refresh_tokens(id, user_id, token_hash, expires_at, revoked_at, ip, user_agent)
 
 cards(id, uid UNIQUE, label, type, status, issued_at, blocked_at,
@@ -73,6 +78,7 @@ meal_periods(id, code UNIQUE, name, start_time, end_time, crosses_midnight,
              is_active, sort_order, allow_multiple)   -- BREAKFAST/LUNCH/DINNER/NIGHT
 devices(id, code UNIQUE, name, location, api_key_hash, status,
         last_seen_at, firmware, notes)                 -- RFID уншигч / киоск
+locations(id, name UNIQUE, status)                     -- уншилтын байршил; scan_events.location_id
 settings(key PK, value jsonb, updated_at, updated_by)   -- day_start_hour, tz, ...
 
 scan_events(                              -- APPEND-ONLY, бүх оролдлого
@@ -120,7 +126,7 @@ report_exports(id, requested_by, params JSONB, format, file_path, created_at)
 | Хувилбар | Тайлбар | Хэзээ сонгох |
 |---|---|---|
 | **A. HID "keyboard wedge" уншигч** (хамгийн түгээмэл, EM4100 / Mifare USB) | Уншигч нь гарын курсор шиг картын UID-г бичээд Enter дарна. Кiosk горимд `/kiosk` хуудас нээлттэй, далд input фокуслагдсан байна → `POST /api/scans` руу шууд илгээнэ. Нэмэлт драйвер, програм шаардлагагүй. | **Анхдагч сонголт** |
-| **B. Serial / PC-SC / node-hid agent** | `apps/reader-agent` — Node процесс `serialport`/`node-hid`-ээр уншаад локал API руу илгээнэ. Офлайн дараалал (SQLite) + дахин илгээх боломжтой. | Сүлжээ тогтворгүй, эсвэл уншигч keyboard горимгүй бол |
+| **B. Serial / PC-SC / node-hid agent** | `backend/reader-agent` — Node процесс `serialport`/`node-hid`-ээр уншаад локал API руу илгээнэ. Офлайн дараалал (SQLite) + дахин илгээх боломжтой. | Сүлжээ тогтворгүй, эсвэл уншигч keyboard горимгүй бол |
 
 Уншигчийн бодит модель тодорхой болмол зөвхөн нэг замыг хэрэгжүүлнэ. Хоёр замын API нь ижил (`/api/scans`) тул backend өөрчлөгдөхгүй.
 
@@ -134,11 +140,14 @@ report_exports(id, requested_by, params JSONB, format, file_path, created_at)
 POST   /auth/login                  → httpOnly cookie (access 15m + refresh 7d)
 POST   /auth/refresh  /auth/logout
 GET    /auth/me                     → хэрэглэгч + permissions[]
+PATCH  /auth/profile                → нэр, утас, нэгж, албан тушаал, зураг, нууц үг
 
 GET    /users?search&role&status&departmentId&page
 POST   /users                       ← 'user:create'
 GET    /users/:id                   → карт, сүүлийн уншилт, статистик
 PATCH  /users/:id                   ← 'user:update'
+GET    /users/:id/permissions       ← 'user:read'  (үндсэн эрх + override)
+PUT    /users/:id/permissions       ← ADMIN        (override-уудыг бүхэлд нь солино)
 PATCH  /users/:id/status            ← 'user:deactivate'
 POST   /users/:id/reset-password
 
@@ -147,10 +156,11 @@ POST   /cards/:id/assign  /cards/:id/release
 POST   /cards/:id/block   /cards/:id/unblock
 GET    /cards/:id/history
 
-POST   /scans                       ← төхөөрөмж/киоск (device key)
-       body: { cardUid, scannedAt, deviceCode, idempotencyKey }
-       res:  { decision, user?, period?, businessDate, message }
-GET    /scans?from&to&period&decision&userId&deviceId&page
+POST   /scans                       ← төхөөрөмж/киоск (device key эсвэл 'scan:create')
+       body: { cardUid, scannedAt, deviceCode, idempotencyKey, locationId }
+       res:  { decision, user?, companyName?, period?, businessDate, message }
+GET    /scans?from&to&period&decision&userId&deviceId&locationId&page
+GET    /scans/recent?locationId&limit     → киоскын сүүлийн уншилт (нээлттэй)
 POST   /scans/:id/void              ← 'scan:correct'  (шалтгаан заавал)
 GET    /scans/live                  ← SSE, dashboard-ийн шууд урсгал
 
@@ -158,13 +168,18 @@ GET    /reports/meal-counts?from&to&groupBy=day|week|month|quarter|year
                         &period&departmentId&userId&includeVoided=false
 GET    /reports/attendance          → хэн хэдэн хоол идсэн, идээгүй хүмүүс
 GET    /reports/by-department
+GET    /reports/by-location
 GET    /reports/comparison          → өмнөх үетэй харьцуулалт (%, diff)
 GET    /reports/integrity           → scan_events ↔ meal_records зөрүү
 GET    /reports/export?format=csv|xlsx   → streaming, 100k мөр хүртэл
 
 GET/POST/PATCH /meal-periods
 GET/POST/PATCH /devices   POST /devices/:id/rotate-key
-GET/PATCH /settings
+GET    /locations (нээлттэй)  POST/PATCH /locations
+GET/POST/PATCH /companies
+GET/POST/PATCH/DELETE /reference/:kind   (units | positions, бичих — ADMIN)
+GET/PATCH /departments
+GET    /settings/branding (нээлттэй)  PUT /settings/branding
 GET    /audit-logs
 GET    /health  /health/ready
 ```
@@ -193,85 +208,48 @@ GROUP BY 1 ORDER BY 1;
 
 ```
 food_pos/
-├─ package.json                  # workspaces: apps/*, packages/*
-├─ docker-compose.yml            # postgres, api, web(nginx), (redis)
+├─ package.json                  # workspaces: backend, frontend, shared
+├─ docker-compose.yml            # (төлөвлөсөн) postgres, api, web(nginx), (redis)
 ├─ .env.example
 ├─ PLAN.md  README.md
-├─ apps/
-│  ├─ api/
-│  │  ├─ db/
-│  │  │  ├─ schema.sql
-│  │  │  ├─ migrations/
-│  │  │  └─ seed.ts               # admin, period, demo users/cards
-│  │  ├─ src/
-│  │  │  ├─ index.ts              # bootstrap, graceful shutdown
-│  │  │  ├─ app.ts                # express app, middleware, routes
-│  │  │  ├─ config/env.ts         # zod-аар шалгасан env
-│  │  │  ├─ db/pool.ts
-│  │  │  ├─ modules/
-│  │  │  │  ├─ auth/       {routes,controller,service,schemas,password}.ts
-│  │  │  │  ├─ users/      {routes,controller,service,schemas}.ts
-│  │  │  │  ├─ cards/      {routes,controller,service,schemas}.ts
-│  │  │  │  ├─ scans/      {routes,controller,scan.service.ts,decision.ts}
-│  │  │  │  ├─ reports/    {routes,controller,queries.sql.ts,grouping.ts}
-│  │  │  │  ├─ periods/    devices/   settings/
-│  │  │  │  ├─ audit/      exports/   health/
-│  │  │  ├─ middleware/
-│  │  │  │  ├─ auth.ts            # JWT → req.user
-│  │  │  │  ├─ rbac.ts            # requirePermission()
-│  │  │  │  ├─ deviceAuth.ts
-│  │  │  │  ├─ validate.ts        # zod
-│  │  │  │  ├─ error.ts  requestId.ts  rateLimit.ts
-│  │  │  ├─ lib/
-│  │  │  │  ├─ businessDate.ts    # ★ гол логик, unit test-тэй
-│  │  │  │  ├─ permissions.ts
-│  │  │  │  ├─ csv.ts xlsx.ts
-│  │  │  │  ├─ logger.ts          # pino
-│  │  │  │  └─ audit.ts
-│  │  │  ├─ jobs/
-│  │  │  │  ├─ nightlyReconcile.ts
-│  │  │  │  ├─ refreshSummary.ts
-│  │  │  │  └─ scheduler.ts       # node-cron
-│  │  │  └─ types/
-│  │  └─ tests/
-│  │     ├─ unit/businessDate.test.ts
-│  │     ├─ unit/decision.test.ts
-│  │     ├─ integration/scans.duplicate.test.ts   # ★ давхардлын тест
-│  │     ├─ integration/reports.gaps.test.ts
-│  │     └─ integration/rbac.test.ts
-│  ├─ web/                        # React 19 + Vite + TS + shadcn/ui
-│  │  ├─ index.html  vite.config.ts  tailwind.config.ts  components.json
-│  │  └─ src/
-│  │     ├─ main.tsx  App.tsx  router.tsx
-│  │     ├─ components/
-│  │     │  ├─ ui/                # shadcn: button, table, dialog, select, ...
-│  │     │  ├─ layout/            # AppShell, Sidebar, Topbar, RoleGate
-│  │     │  ├─ common/            # DataTable, DateRangePicker, EmptyState, ExportMenu
-│  │     │  └─ charts/            # MealTrendChart, PeriodDistribution
-│  │     ├─ features/
-│  │     │  ├─ auth/              # LoginPage, useAuth
-│  │     │  ├─ dashboard/         # өнөөдрийн тоо, 4 хоолны задаргаа, сүүлийн уншилт
-│  │     │  ├─ kiosk/             # KioskPage (HID input, дуут/визуал баталгаа)
-│  │     │  ├─ users/             # list, create dialog, detail, deactivate
-│  │     │  ├─ cards/             # list, assign, block
-│  │     │  ├─ scans/             # лог, шүүлт, void dialog
-│  │     │  ├─ reports/           # ReportPage (day/week/month/quarter/year tabs)
-│  │     │  └─ settings/          # periods, devices, permissions, audit log
-│  │     ├─ lib/
-│  │     │  ├─ api.ts             # fetch wrapper, 401 → refresh
-│  │     │  ├─ queryClient.ts     # TanStack Query
-│  │     │  ├─ permissions.ts     # can('report:read')
-│  │     │  └─ format.ts          # TZ, тоо, огноо (mn-MN)
-│  │     ├─ hooks/  types/
-│  └─ reader-agent/               # (сонголтоор) serialport/node-hid → API
-├─ packages/
-│  └─ shared/                     # API contracts (zod) — api & web хоёулаа импортолно
-│     └─ src/{types.ts, schemas.ts, constants.ts, permissions.ts}
-└─ docs/
+├─ backend/                       # Express 5 + TypeScript API
+│  ├─ db/
+│  │  ├─ schema.sql
+│  │  ├─ migrations/              # (төлөвлөсөн)
+│  │  └─ seed.ts                  # admin, period, demo users/cards
+│  ├─ src/
+│  │  ├─ index.ts                 # bootstrap, graceful shutdown
+│  │  ├─ app.ts                   # express app, middleware, routes
+│  │  ├─ config/env.ts            # zod-аар шалгасан env
+│  │  ├─ db/pool.ts
+│  │  ├─ modules/
+│  │  │  ├─ auth/       users/     cards/
+│  │  │  ├─ scans/      reports/   periods/
+│  │  │  ├─ devices/    audit/     departments/
+│  │  │  ├─ locations/  companies/ reference/
+│  │  │  └─ settings/             # branding (footer, лого)
+│  │  ├─ middleware/              # auth, rbac, deviceAuth, validate, error, rateLimit, security
+│  │  ├─ lib/                     # time (бизнес өдөр/цонх), tokens, password, loginLock,
+│  │  │                           # permissions, sql, audit, dto, bigint
+│  │  ├─ jobs/reconcile.ts        # 6 цаг тутам зөрүү шалгах
+│  │  └─ types/
+│  └─ tests/                      # time, windows, rateLimit, loginLock, permissions
+├─ frontend/                      # React 19 + Vite + TS + shadcn/ui
+│  ├─ index.html  vite.config.ts  tailwind.config.ts
+│  └─ src/
+│     ├─ main.tsx  App.tsx
+│     ├─ components/              # ui (shadcn), layout (AppShell), common
+│     ├─ pages/                   # Kiosk (нээлттэй), Dashboard, Reports, Scans,
+│     │                           # Users, Cards, Settings, Profile, Login
+│     ├─ lib/                     # api, auth, utils, image (зураг resize/data URL)
+│     └─ types/
+├─ shared/                        # API contracts (zod) — api & web хоёулаа импортолно
+│  └─ src/{types.ts, schemas.ts, meal.ts, permissions.ts, format.ts, index.ts}
+└─ docs/                          # (төлөвлөсөн)
    ├─ API.md  DB.md  RFID-SETUP.md  DEPLOY.md
 ```
 
-**Яагаад monorepo + shared:** `packages/shared` доторх zod schemas нь backend-ийн validation ба frontend-ийн form validation-ийг нэг эх сурвалжаас гаргана → API болон UI хэзээ ч зөрөхгүй.
+**Яагаад monorepo + shared:** `shared` доторх zod schemas нь backend-ийн validation ба frontend-ийн form validation-ийг нэг эх сурвалжаас гаргана → API болон UI хэзээ ч зөрөхгүй.
 
 ---
 
@@ -280,7 +258,7 @@ food_pos/
 | Үе | Агуулга | Дуусах шалгуур (acceptance) |
 |---|---|---|
 | **P0. Суурь** (2–3 хоног) | monorepo, TS, ESLint/Prettier, docker-compose, SQL schema, `.env`, health endpoint, shadcn суулгах | `docker compose up` → API `/health` 200, web ачаална |
-| **P1. Auth + RBAC** (3–4 хоног) | users/permissions таблиц, login/refresh/logout, argon2, requirePermission, audit log, seed admin | 3 түвшний хэрэглэгчээр нэвтэрч, зөвхөн зөв цэс/endpoint харагдана (rbac тест) |
+| **P1. Auth + RBAC** (3–4 хоног) | role-based эрх + хэрэглэгч тус бүрийн override, login/refresh/logout, scrypt, requirePermission, audit log, seed admin | 3 түвшний хэрэглэгчээр нэвтэрч, роль болон override-оор зөвхөн зөв цэс/endpoint харагдана (rbac тест) |
 | **P2. Хэрэглэгч ба карт** (4–5 хоног) | user CRUD (+эрхийн хязгаар), card CRUD, assign/release, block/unblock, түүх | "USER" түвшин зөвхөн USER нэмж, карт идэвхгүй болгож чадна; өөр үйлдэл 403 |
 | **P3. Уншилт ба хоолны логик** (5–7 хоног) | `businessDate.ts`, period тодорхойлогч, decision engine, `POST /scans`, unique constraint, idempotency, kiosk хуудас, эхний HID уншигчтай туршилт | Ижил картыг 2 удаа уншуулахад 1 meal_record; өөр өдөр/өөр хоолд шинээр бүртгэгдэнэ; 00:30-ийн уншилт өмнөх өдөрт орно |
 | **P4. Тайлан** (6–8 хоног) | meal-counts (5 бүлэглэл), attendance, department, comparison, export CSV/XLSX, summary refresh job, график | 5 хугацааны бүлэглэл тус бүр гараар тооцсонтой таарна (fixture тест); хоолгүй өдөр 0-ээр харагдана |
@@ -308,7 +286,7 @@ food_pos/
 
 ## 9. Аюулгүй байдал ба ажиллагаа
 
-- **Нэвтрэх**: JWT access (15 мин, httpOnly + SameSite) + refresh rotation (7 хоног), argon2id, 5 удаагийн буруу оролдлогоор түр түгжих.
+- **Нэвтрэх**: JWT access (15 мин, httpOnly + SameSite) + refresh rotation (7 хоног), scrypt, 5 удаагийн буруу оролдлогоор 15 минут түр түгжих.
 - **Эрх**: route бүр дээр `requirePermission`, UI дээр `RoleGate` (UX-ийн хувьд; хамгаалалт backend дээр).
 - **Аудит**: хэн, хэзээ, юу өөрчилсөн (before/after JSONB) — засах эрхтэй MANAGER/ADMIN-ийн бүх үйлдэл.
 - **Нөөц**: `pg_dump` өдөр бүр 02:00, 30 хоног хадгална; сар бүр restore тест.
