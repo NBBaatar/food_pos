@@ -35,6 +35,7 @@ export function CardsPage(): JSX.Element {
   const [page, setPage] = useState(1);
   const [createOpen, setCreateOpen] = useState(false);
   const [createForm, setCreateForm] = useState({ uid: '', label: '', userId: 'none' });
+  const [userQuery, setUserQuery] = useState('');
   const [assignTarget, setAssignTarget] = useState<CardListItem | null>(null);
   const [assignUserId, setAssignUserId] = useState('none');
   const [blockTarget, setBlockTarget] = useState<CardListItem | null>(null);
@@ -52,9 +53,11 @@ export function CardsPage(): JSX.Element {
   );
 
   const cards = useQuery({ queryKey: ['cards', params], queryFn: () => cardsApi.list(params) });
+  // 200+ хэрэглэгчтэй байгууллагад ч сонголт бүрэн ажиллахын тулд нэр/код/и-мэйлээр хайна
   const users = useQuery({
-    queryKey: ['users', 'picker'],
-    queryFn: () => usersApi.list({ pageSize: 200, status: 'ACTIVE' }),
+    queryKey: ['users', 'picker', userQuery],
+    queryFn: () =>
+      usersApi.list({ pageSize: 200, status: 'ACTIVE', search: userQuery.trim() || undefined }),
   });
 
   useEffect(() => {
@@ -130,7 +133,14 @@ export function CardsPage(): JSX.Element {
         description="RFID картын бүртгэл, эзэмшигчийн оноолт, эрхийн төлөв."
         actions={
           can(PERMISSIONS.CARD_MANAGE) ? (
-            <Button size="sm" className="gap-2" onClick={() => setCreateOpen(true)}>
+            <Button
+              size="sm"
+              className="gap-2"
+              onClick={() => {
+                setUserQuery('');
+                setCreateOpen(true);
+              }}
+            >
               <Plus className="size-4" />
               Карт нэмэх
             </Button>
@@ -218,6 +228,7 @@ export function CardsPage(): JSX.Element {
                               size="icon"
                               title="Хэрэглэгчид оноох"
                               onClick={() => {
+                                setUserQuery('');
                                 setAssignTarget(card);
                                 setAssignUserId('none');
                               }}
@@ -319,6 +330,11 @@ export function CardsPage(): JSX.Element {
             </div>
             <div className="space-y-1.5">
               <Label>Эзэмшигч</Label>
+              <Input
+                value={userQuery}
+                onChange={(event) => setUserQuery(event.target.value)}
+                placeholder="Нэр, ажилтны код, и-мэйлээр хайх"
+              />
               <Select
                 value={createForm.userId}
                 onValueChange={(value) => setCreateForm({ ...createForm, userId: value })}
@@ -357,6 +373,11 @@ export function CardsPage(): JSX.Element {
               <span className="font-mono">{assignTarget?.uid}</span> картыг хэрэглэгчид холбоно.
             </DialogDescription>
           </DialogHeader>
+          <Input
+            value={userQuery}
+            onChange={(event) => setUserQuery(event.target.value)}
+            placeholder="Нэр, ажилтны код, и-мэйлээр хайх"
+          />
           <Select value={assignUserId} onValueChange={setAssignUserId}>
             <SelectTrigger>
               <SelectValue placeholder="Хэрэглэгч сонгох" />
